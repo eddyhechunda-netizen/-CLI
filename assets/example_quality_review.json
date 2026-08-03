@@ -1,0 +1,60 @@
+{
+  "meta": {
+    "title": "TRON2柔顺控制需求质量检查报告",
+    "project": "TRON2柔顺控制",
+    "version": "需求V1.0",
+    "source": "需求文档"
+  },
+  "summary": {
+    "requirement_count": 3,
+    "issue_count": 2,
+    "blocker_count": 1,
+    "score": 78
+  },
+  "requirements": [
+    {
+      "id": "REQ-001",
+      "module": "重力补偿",
+      "text": "额定负载范围内末端残余力≤5N",
+      "testable": true,
+      "risk": "P0"
+    },
+    {
+      "id": "REQ-002",
+      "module": "负载辨识",
+      "text": "系统应准确识别负载质量和质心",
+      "testable": false,
+      "risk": "P0"
+    },
+    {
+      "id": "REQ-003",
+      "module": "碰撞保护",
+      "text": "碰撞检测时延≤50ms",
+      "testable": true,
+      "risk": "P0"
+    }
+  ],
+  "findings": [
+    {
+      "id": "RQ-001",
+      "requirement_id": "REQ-002",
+      "severity": "阻断",
+      "category": "缺少验收标准",
+      "problem": "“准确识别”没有质量和质心允许误差",
+      "suggestion": "补充质量误差、质心三轴误差和重复性要求"
+    },
+    {
+      "id": "RQ-002",
+      "requirement_id": "REQ-003",
+      "severity": "一般",
+      "category": "统计口径不明确",
+      "problem": "未说明50ms指标采用最大值、平均值还是分位值",
+      "suggestion": "明确采样次数、计时起止点和合格统计口径"
+    }
+  ],
+  "open_questions": [
+    "负载质量辨识允许误差是多少？",
+    "碰撞检测时延使用最大值还是P99判定？"
+  ],
+  "conclusion": "核心功能具备测试基础，但负载辨识指标缺少验收阈值，建议补齐后再冻结需求。"
+}

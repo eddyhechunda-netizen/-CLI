@@ -1,0 +1,60 @@
+{
+  "meta": {
+    "project_id": "TRON2-V5",
+    "version": "r-2.1.17",
+    "testers": "@待填写"
+  },
+  "sheets": [
+    {
+      "name": "硬件性能",
+      "title": "硬件性能",
+      "cases": [
+        {
+          "module": "硬件性能-充电桩机械结构",
+          "name": "靠墙安装-贴墙安装（0-5cm）",
+          "precondition": "充电桩未固定，墙面平整",
+          "steps": "1.将充电桩贴墙放置（距离墙面0-5cm）\n2.手动模拟机器人对接3次",
+          "expected": "充电桩不倾倒，晃动≤0.1cm",
+          "type": "功能测试",
+          "status": "正常",
+          "level": "高",
+          "creator": "",
+          "requirement_ids": ["REQ-001"],
+          "requirement_text": "充电桩靠墙安装后应保持稳定"
+        },
+        {
+          "module": "硬件性能-充电桩机械结构",
+          "name": "定位标识识别-识别距离1.0m",
+          "precondition": "光照正常，标识清洁无遮挡",
+          "steps": "1.机器人在距充电桩1.0m处\n2.尝试识别定位标识\n3.重复10次记录成功率",
+          "expected": "10次均成功识别定位标识",
+          "type": "功能测试",
+          "status": "正常",
+          "level": "高",
+          "creator": "",
+          "requirement_ids": ["REQ-002"],
+          "requirement_text": "定位标识识别距离为1~2m"
+        }
+      ]
+    },
+    {
+      "name": "软件功能",
+      "title": "软件功能",
+      "cases": [
+        {
+          "module": "软件功能-回充业务逻辑",
+          "name": "离开充电桩-电量9%禁止离开",
+          "precondition": "机器人在桩上，电量=9%",
+          "steps": "1.下发离开充电桩指令",
+          "expected": "拒绝离开，报错“电量过低”，机器人保持在桩",
+          "type": "功能测试",
+          "status": "正常",
+          "level": "高",
+          "creator": "",
+          "requirement_ids": ["REQ-003"],
+          "requirement_text": "电量低于10%时禁止离开充电桩"
+        }
+      ]
+    }
+  ]
+}
