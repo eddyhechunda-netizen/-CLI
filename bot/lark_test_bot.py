@@ -253,15 +253,7 @@ ECM_REFERENCE_SUMMARY = """
 1. 若日志出现状态字/状态机为 0x0、`link_status = 0x5617/0x5a37`、`lost link cnt of port1 > 0`，优先判断为硬件链路/从站掉线，需要排查网线、端口、驱动器供电和从站连接。
 2. 若电机状态字非 0，则是驱动器按故障码进入保护，按 `错误代码是 0x%x` 对照《Tron2电机驱动故障保护机制说明》故障码总表定位：停机类（0xFF01母线过流/0x3210过压/0x3220欠压/0x7121堵转/0x8400过速/0x4420电机低温/0x4400电机高温）=驱动器失能，限额类（0x4310/0x4320驱动温度/0x7122/0x2221峰值电流/0x3230/0x2222累计热量）=降功率限扭。
 3. 常温下出现低温类故障码（0x4420/0x4320）优先怀疑温度传感器硬件异常；限额类多在低于检测条件后自动清除，停机类多需控制字写128清除或电压/温度回正常（母线过流需重启）。
-4. 若仅表现为 `ecm err`/`ethercat exit` 后短时间自恢复，且没有上述硬件链路或配置错误证据，应优先按本地人工确认规则判断为遥控器控制主站手动掉电/上电导致的瞬时 ECM 异常。
-""".strip()
-ECM_LOCAL_DIAGNOSIS_RULES = """
-[本地人工确认规则]
-- 若 snowball 侧表现为：`ecm err` / `EV_EXP_ECM` / `ethercat exit` 后，在十几秒到几十秒内出现 `ethercat ok`、`ecm ok` 或 `EV_EXP_RELEASE_ECM` 自恢复；
-  且 ethercat 侧表现为 `EcMainCreateApp failed`、`End programm`、`DiagnosticValue ... code: 131076 message: ethercat exit` 后重新启动并恢复；
-  同时日志未出现知识库所列的明确硬件断线证据（如状态字为 0x0、`link_status = 0x5617/0x5a37`、`lost link cnt of port1 > 0` 等），
-  则优先判定为：**遥控器控制主站手动掉电/上电导致的瞬时 ECM 异常，并已自恢复**。
-- 对这类模式不要笼统写成“硬件断线”“主站应用创建失败根因不明”；除非日志另有反证，否则根因结论写“遥控器控制主站手动掉电”。
+4. 若仅表现为 `ecm err`/`ethercat exit` 后短时间自恢复，且异常前没有明确的电机状态字/错误码、硬件链路、配置、通信或供电错误证据，才可按知识库模板判断为遥控器控制主站手动掉电/上电导致的瞬时 ECM 异常。
 """.strip()
 
 STOP_EVENT = threading.Event()
@@ -3190,7 +3182,6 @@ ethercat 节点异常窗口和知识库内容，请据此还原全过程机器�
 **EtherCAT 主站异常深度分析（条件性，务必严格遵守）**：
 - 仅当下方日志正文中出现「{ECM_DEEP_ANALYSIS_MARKER}」区块时，才必须**额外输出**下面这一节；若正文中没有该区块，则**绝对不要**输出第五节，也不要提及 ethercat 深度分析。
 - 该区块内含：从 snowball 判定出的主站异常触发信号、ethercat 节点自身的打印日志、以及来自《EtherCAT主站定位电机通信掉线问题方法》《EtherCAT 网络拓扑与从站号对照表（双臂 DACH / 双足 SF / 轮足 WF）》《Tron2电机驱动故障保护机制说明》的判断规则摘要。
-- 若区块内出现「本地人工确认规则」，该规则来自现场人工复核，优先级高于模型自行推测；日志模式命中时必须按该规则给出根因结论。
 ## 五、EtherCAT 主站异常根因（仅在存在上述区块时输出）
 - 结合区块内 ethercat 节点日志中的错误码/报错文件行/固件版本/配置加载等信息，**逐条对照知识库依据**，给出主站异常的**最可能根因**（如从站配置/XML、固件版本不匹配、SDO/PDO 报错、末端执行器/机器人 SN 校验失败、通讯掉线等）。
 - 明确指出命中了知识库中的哪条判断依据（引用其关键描述），以及对应的处置/排查建议；知识库读取失败或依据不足时，如实说明并给出基于 ethercat 日志的初步判断，不要臆造依据。
@@ -4032,8 +4023,6 @@ def build_ecm_deep_analysis_block(file_path, evidence, snowball_lines):
         f"{evidence_text}\n\n"
         f"{ethercat_section}\n\n"
         f"{diagnostic_section}\n\n"
-        "-- 本地人工确认规则（优先级高于通用推测）--\n"
-        f"{ECM_LOCAL_DIAGNOSIS_RULES}\n\n"
         "-- EtherCAT 主站异常判断依据（知识库，来自飞书 wiki）--\n"
         f"{reference}"
     )
@@ -4097,6 +4086,16 @@ def validate_log_analysis_answer(source, answer):
     answer_lower = answer_text.lower()
     missing = []
     incidents = set()
+    motor_warning_times = []
+    too_many_loss_times = []
+    for line in source_text.splitlines():
+        timestamp = parse_log_time(line)
+        if not timestamp:
+            continue
+        if ETHERCAT_MOTOR_WARNING_RE.search(line):
+            motor_warning_times.append(timestamp)
+        if "too many loss" in line.lower():
+            too_many_loss_times.append(timestamp)
     for regex in (ETHERCAT_MOTOR_WARNING_RE, ETHERCAT_MOTOR_ENABLE_FAILURE_RE):
         for match in regex.finditer(source_text):
             if regex is ETHERCAT_MOTOR_WARNING_RE:
@@ -4104,10 +4103,20 @@ def validate_log_analysis_answer(source, answer):
             else:
                 motor, statusword, code = match.group(1), match.group(3), match.group(4)
             incidents.add((int(motor), statusword.lower(), code.lower()))
+
+    motor_ranges = []
+    for match in re.finditer(
+        r"(?:电机|motor)\s*(\d+)\s*(?:~|～|-|至|到)\s*"
+        r"(?:(?:电机|motor)\s*)?(\d+)",
+        answer_text,
+        re.IGNORECASE,
+    ):
+        start, end = int(match.group(1)), int(match.group(2))
+        motor_ranges.append((min(start, end), max(start, end)))
     for motor, statusword, code in sorted(incidents):
         motor_mentioned = bool(
             re.search(rf"(?:电机|motor)\s*{motor}(?!\d)", answer_text, re.IGNORECASE)
-        )
+        ) or any(start <= motor <= end for start, end in motor_ranges)
         if not motor_mentioned or statusword not in answer_lower or code not in answer_lower:
             missing.append(f"电机{motor} {statusword}/{code}")
 
@@ -4123,6 +4132,30 @@ def validate_log_analysis_answer(source, answer):
     )
     if nonzero_lost_link and claims_lost_link_zero:
         missing.append("存在非零 lost link 计数，但结论写成全部为0")
+    has_motor_trigger = any(
+        0 <= (loss_time - warning_time).total_seconds() <= 2
+        for warning_time in motor_warning_times
+        for loss_time in too_many_loss_times
+    )
+    manual_power_matches = re.finditer(
+        r"(?:遥控器.{0,12}(?:掉电|断电|上电)|手动(?:掉电|断电|上电))",
+        answer_text,
+        re.IGNORECASE,
+    )
+    claims_manual_power = False
+    for match in manual_power_matches:
+        prefix = answer_text[max(0, match.start() - 16):match.start()]
+        if re.search(
+            r"(?:不能|不可|不是|不应|不得|并非|排除|无.{0,8}).{0,8}$",
+            prefix,
+        ):
+            continue
+        claims_manual_power = True
+        break
+    if has_motor_trigger and claims_manual_power:
+        missing.append(
+            "电机告警后紧接 Too many loss，不得改判为遥控器手动掉电/上电"
+        )
     if missing:
         raise RuntimeError(
             "日志分析结果未通过证据一致性门禁：" + "；".join(missing)

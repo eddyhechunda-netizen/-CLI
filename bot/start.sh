@@ -4,6 +4,12 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 mkdir -p bot/logs bot/state bot/jobs
 
+# Non-interactive shells do not load nvm, so expose user-installed CLIs.
+for node_bin in "$HOME"/.nvm/versions/node/*/bin; do
+  [[ -d "$node_bin" ]] && PATH="$node_bin:$PATH"
+done
+export PATH
+
 if [[ -f bot/state/service.pid ]]; then
   old_pid="$(cat bot/state/service.pid)"
   if kill -0 "$old_pid" 2>/dev/null; then

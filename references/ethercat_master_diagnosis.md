@@ -227,7 +227,9 @@ slave = %d, link_status = 0x%x, ret = %d
 ## 四、典型根因模板（供直接套用结论）
 
 ### 模板 A：遥控器控制主站手动掉电/上电（瞬时自恢复）
-命中特征：`ecm err` / `EV_EXP_ECM` / `ethercat exit` 后十几秒到几十秒内出现 `ethercat ok` / `ecm ok` / `EV_EXP_RELEASE_ECM` 自恢复；ethercat 侧 `EcMainCreateApp failed` / `End programm` / `code:131076 ethercat exit` 后重启恢复；**且无**上述硬件断线证据（状态字 0x0、`link_status=0x5617/0x5a37`、`lost link cnt of port1 > 0`）。
+命中特征：`ecm err` / `EV_EXP_ECM` / `ethercat exit` 后十几秒到几十秒内出现 `ethercat ok` / `ecm ok` / `EV_EXP_RELEASE_ECM` 自恢复；ethercat 侧 `EcMainCreateApp failed` / `End programm` / `code:131076 ethercat exit` 后重启恢复；**且异常发生前没有明确的电机状态字/错误码、配置、通信或供电异常作为触发证据**，也无上述硬件断线证据（状态字 0x0、`ret=-3`、`lost link cnt of port1 > 0`）。
 
 - 根因结论固定写：**遥控器控制主站手动掉电/上电导致的瞬时 ECM 异常，并已自恢复**。
+- 若某电机异常打印后紧接 `Too many loss`，应按时间顺序将该电机异常判为直接触发原因，
+  不得仅因后续重启自恢复而套用本模板。
 - 不要笼统写成「硬件断线」「主站应用创建失败根因不明」。除非日志另有反证。
