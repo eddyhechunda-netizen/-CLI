@@ -48,7 +48,7 @@ EtherCAT 通信异常通常分两类：
 slave = %d, link_status = 0x%x, ret = %d
 ```
 重点看**从站 (M-1)** 的 link_status：
-- link_status == 0x5617 → 明确结论：从站 (M-1) 与从站 (M) 之间**硬件断线**。
+- link_status == 0x5617 → 记录为链路异常信号，继续结合 `ret`、lost link 计数和后续恢复状态复核；不能单独据此判定硬件断线。
 - link_status == 0x5a37 → 未直接判定断线，继续 Step 4。
 
 **Step 4：检查 EtherCAT 链路错误计数器**
@@ -67,7 +67,8 @@ slave = %d, link_status = 0x%x, ret = %d
 | --- | --- | --- |
 | 状态字 | ≠ 0 | 驱动器固件问题（见「三」） |
 | 状态字 | = 0 | 进入硬件排查 |
-| 前一从站 link_status | 0x5617 | 硬件断线，排查线束/硬件 |
+| 前一从站 link_status | 0x5617 且 ret 异常或 lost link cnt > 0 | 硬件断线，排查线束/硬件 |
+| 前一从站 link_status | 0x5617 但 ret 正常且 lost link cnt = 0 | 仅为链路异常信号，结合后续恢复判断，不单独定性硬件断线 |
 | 前一从站 link_status | 0x5a37 且 lost link cnt > 0 | 硬件断线，排查线束/硬件 |
 | 前一从站 link_status | 0x5a37 且 lost link cnt = 0 | 固件/软件导致的通信异常 |
 
@@ -78,7 +79,7 @@ slave = %d, link_status = 0x%x, ret = %d
 - `[8a]=255`：从站向上游发送大量错误帧（error rx frames of port1 饱和）。
 - `ret=-3`：从站离线（SDO/链路访问返回失败）。
 - `0xf10b` / `ethercat exit`：EtherCAT 主站退出。
-- `link_status=0x5617`：明确硬件断线；`link_status=0x5a37`：需结合 lost link cnt 复核。
+- `link_status=0x5617/0x5a37`：均需结合 `ret`、lost link cnt 和后续恢复复核，不能脱离证据链单独定性。
 
 ---
 
