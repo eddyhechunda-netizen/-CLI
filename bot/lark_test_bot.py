@@ -3465,8 +3465,8 @@ ethercat 节点异常窗口和全文件诊断证据，请据此还原全过程�
 - 正文中每个段落/块形如 `<p id="blkxxx">…</p>`、`<h2 id="blkxxx">…</h2>`、`<table id="blkxxx">…`，其 id 即该段落的 block_id。
 - 你只能引用文档正文中真实出现过的 block_id，禁止臆造或猜测 id；无法定位到具体段落时不要给引用。
 - 在回答正文末尾追加一节「## 引用溯源」，逐条列出你作答所依据的段落，每条格式为 Markdown 链接：
-  `- [《{{文档标题}}》· <该段落的简短定位或摘要，10~20字>]({{文档链接}}?blockId={{block_id}})`
-  其中「文档标题」「文档链接」取自上方元信息中的对应字段，`{{block_id}}` 用你实际引用段落的 id（把 `?blockId=` 后直接拼 block_id，不要保留尖括号或花括号）。
+  `- [《{{文档标题}}》· <该段落的简短定位或摘要，10~20字>]({{文档链接}}#{{block_id}})`
+  其中「文档标题」「文档链接」取自上方元信息中的对应字段，`{{block_id}}` 用你实际引用段落的 id（把 `#` 后直接拼 block_id，不要保留尖括号或花括号）。
 - 引用按在回答中被使用的先后排列，去重，一般 1~5 条；只列真正支撑结论的段落，避免堆砌。
 
 用户问题：
@@ -4556,7 +4556,7 @@ def prepare_doc_qa_source(source, question=None):
         f"文档标题：{title}\n"
         f"文档ID：{doc_id or '未知'}\n"
         f"文档链接：{base_url}\n"
-        f"段落直达链接格式：{base_url}?blockId=<block_id>\n"
+        f"段落直达链接格式：{base_url}#<block_id>\n"
         "（正文中每个段落/块形如 <p id=\"blkxxx\">…</p> 或 <h2 id=\"blkxxx\">…</h2>，"
         "其中 id 的值即 block_id；把它拼进上面的链接格式即可得到该段落的一键跳转链接。）"
     )
@@ -4617,11 +4617,10 @@ def build_doc_anchor_map(content):
 
 
 def remap_doc_qa_citations(result, content):
-    """把回答里引用链接改写为可靠顶层锚点，并统一为飞书的 `?blockId=` 定位参数。
+    """把回答里引用链接改写为可靠顶层锚点，并统一为飞书 fragment。
 
-    飞书文档/知识库用查询参数 `?blockId=<id>` 定位块（而非 `#<id>` fragment），
-    且只有顶层块（标题 / 表格）能可靠跳转，因此这里把 block_id 映射到顶层锚点后，
-    统一输出 `...?blockId=<anchor>` 形式。
+    飞书文档使用 `#<block_id>` 定位块。只有顶层块（标题 / 表格）能可靠跳转，
+    因此这里先把 block_id 映射到顶层锚点，再统一输出 fragment 形式。
     """
     if not result or not content:
         return result
@@ -4632,7 +4631,7 @@ def remap_doc_qa_citations(result, content):
     def repl(mo):
         base = mo.group(1)
         anchor = anchor_map.get(mo.group(2), mo.group(2))
-        return f"{base}?blockId={anchor})"
+        return f"{base}#{anchor})"
 
     return re.sub(
         r"(\]\(https?://[^)\s#?]+)(?:#|\?blockId=)([A-Za-z0-9]+)\)",

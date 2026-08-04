@@ -330,6 +330,21 @@ class DocumentQaRegressionTests(unittest.TestCase):
         self.assertIn("这个需求的碰撞保护触发时延是多少？", prompt)
         self.assertIn("触发时延不超过50ms", prompt)
 
+    def test_citations_use_feishu_fragment_and_table_anchor(self):
+        content = (
+            '<h2 id="heading1">模式切换</h2>'
+            '<table id="table1"><tr><td><p id="paragraph1">正序切换</p></td></tr></table>'
+        )
+        result = (
+            "- [模式正序]"
+            "(https://example.feishu.cn/wiki/doc1?blockId=paragraph1)"
+        )
+
+        remapped = bot.remap_doc_qa_citations(result, content)
+
+        self.assertIn("https://example.feishu.cn/wiki/doc1#table1", remapped)
+        self.assertNotIn("?blockId=", remapped)
+
 
 if __name__ == "__main__":
     unittest.main()
