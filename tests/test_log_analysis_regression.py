@@ -315,5 +315,21 @@ class DeterministicCasePipelineTests(unittest.TestCase):
         )
 
 
+class DocumentQaRegressionTests(unittest.TestCase):
+    def test_prompt_uses_job_instruction_as_question(self):
+        prompt = bot.build_prompt(
+            {
+                "action": "doc_qa",
+                "source": "https://example.feishu.cn/docx/document",
+                "instruction": "这个需求的碰撞保护触发时延是多少？",
+            },
+            Path("/tmp/job"),
+            "文档标题：测试需求\n文档正文：触发时延不超过50ms。",
+        )
+
+        self.assertIn("这个需求的碰撞保护触发时延是多少？", prompt)
+        self.assertIn("触发时延不超过50ms", prompt)
+
+
 if __name__ == "__main__":
     unittest.main()
