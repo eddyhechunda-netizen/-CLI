@@ -3419,7 +3419,12 @@ ethercat 节点异常窗口和全文件诊断证据，请据此还原全过程�
 
 输出要求（中文 Markdown，用列表/表格；每条结论尽量带**时间点或 clk 值**佐证）：
 - 回复必须**简短、准确、结论唯一**：不要并列给多个“可能原因”；证据足够时直接给唯一根因。
+- 若只有启动阶段短暂 `ecm err`，随后出现 `ethercat ok/ecm ok`，且没有电机异常、
+  `Too many loss`、主站退出、非零 lost link 或其他通信掉线证据，则只输出：
+  `**✅ 结论：这是一个正常日志，无 EtherCAT 通信异常或电机故障。**`
+  不再输出任何小节、异常分析、风险建议或 EtherCAT 主站异常根因。
 - 不能只有一句话短结论；但也不要展开冗长流程。保留「最终结论 / 触发原因 / 排查建议」三块即可。
+  上述“正常日志”场景除外。
 - 不输出无关趋势、过程性说明或泛泛建议；只保留与主站异常根因相关的关键证据和可执行排查项。
 
 **最顶部必须先给「结论先行」**：正文第一行就是一句话总体定性，独占一段、加粗，并以状态标记开头——运行正常用 `✅`、有告警/自恢复用 `⚠️`、有未恢复错误用 `❌`，例如：
@@ -4201,6 +4206,34 @@ def try_render_local_log_analysis(path):
     return render_manual_power_log_analysis(file_path, snowball_lines, ethercat_lines)
 
 
+def render_normal_log_analysis(source):
+    """启动期 ECM 瞬时未就绪但无通信或电机故障时直接返回短结论。"""
+    source_text = str(source or "")
+    source_lower = source_text.lower()
+    if ECM_DEEP_ANALYSIS_MARKER not in source_text:
+        return None
+    if not (
+        ECM_ANOMALY_ERROR_RE.search(source_text)
+        and ECM_RECOVERED_RE.search(source_text)
+        and re.search(r"enabled successfully", source_text, re.IGNORECASE)
+    ):
+        return None
+    if (
+        ECM_EXIT_RE.search(source_text)
+        or "too many loss" in source_lower
+        or ETHERCAT_MOTOR_WARNING_RE.search(source_text)
+        or ETHERCAT_MOTOR_ENABLE_FAILURE_RE.search(source_text)
+        or ETHERCAT_HARDWARE_LINK_RE.search(source_text)
+        or re.search(
+            r"\[\s*(?:8f|90|91|92)\s*\].*:\s*[1-9]\d*\s*$",
+            source_text,
+            re.IGNORECASE | re.MULTILINE,
+        )
+    ):
+        return None
+    return "**✅ 结论：这是一个正常日志，无 EtherCAT 通信异常或电机故障。**"
+
+
 def build_ecm_deep_analysis_block(file_path, evidence, snowball_lines):
     """构造 EtherCAT 主站异常深度分析区块，只附加日志证据。"""
     ec_node = (LOG_ANALYSIS_ETHERCAT_NODE or "ethercat").lower()
@@ -4690,6 +4723,9 @@ def run_copilot(job, job_dir):
         set_job_progress(job["job_id"], "读取日志", "正在读取并提取 snowball 节点日志。")
         safe_update_job_card(job["job_id"])
         prompt_source = prepare_log_analysis_source(prompt_source)
+        normal_answer = render_normal_log_analysis(prompt_source)
+        if normal_answer:
+            return normal_answer
     prompt = build_prompt(job, job_dir, prompt_source)
     start_ai_usage(job)
     timeout = (

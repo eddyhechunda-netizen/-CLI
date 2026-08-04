@@ -94,6 +94,38 @@ class EvidenceGateRegressionTests(unittest.TestCase):
 
 
 class PreprocessingRegressionTests(unittest.TestCase):
+    def test_startup_ecm_transient_returns_normal_short_answer(self):
+        source = "\n".join(
+            [
+                bot.ECM_DEEP_ANALYSIS_MARKER,
+                "2026-08-03 10:35:41.716 E/snowball: >>>>>|ecm err|",
+                "2026-08-03 10:35:43.026 I/ethercat: Motor 10 (slave 12) enabled successfully.",
+                "2026-08-03 10:35:43.033 I/snowball: ethercat ok! ecm ok",
+            ]
+        )
+
+        answer = bot.render_normal_log_analysis(source)
+
+        self.assertEqual(
+            "**✅ 结论：这是一个正常日志，无 EtherCAT 通信异常或电机故障。**",
+            answer,
+        )
+        self.assertNotIn("异常与错误分析", answer)
+        self.assertNotIn("风险与建议", answer)
+        self.assertNotIn("EtherCAT 主站异常根因", answer)
+
+    def test_real_fault_does_not_use_normal_short_answer(self):
+        source = "\n".join(
+            [
+                bot.ECM_DEEP_ANALYSIS_MARKER,
+                "2026-08-03 11:44:19.714 E/snowball: >>>>>|ecm err|",
+                MOTOR9_TRIGGER,
+                "2026-08-03 11:44:37.170 I/snowball: ethercat ok! ecm ok",
+            ]
+        )
+
+        self.assertIsNone(bot.render_normal_log_analysis(source))
+
     def test_deep_analysis_keeps_evidence_without_embedding_knowledge_base(self):
         log = "\n".join(
             [
