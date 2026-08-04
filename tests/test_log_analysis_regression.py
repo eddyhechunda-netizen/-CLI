@@ -1,3 +1,4 @@
+import json
 import subprocess
 import tempfile
 import unittest
@@ -163,6 +164,106 @@ class CorrectionLoopRegressionTests(unittest.TestCase):
         self.assertIn("missing motor9", revision_prompt)
         self.assertNotIn("FULL ORIGINAL PROMPT", revision_prompt)
         self.assertNotIn("incomplete answer", revision_prompt)
+
+
+class DeterministicCasePipelineTests(unittest.TestCase):
+    def test_prefetch_preserves_complete_xml(self):
+        source_xml = (
+            "<title>需求</title><table><tr><td>触发时延 ≤ 50ms</td></tr></table>"
+            '<img alt="碰撞保护示意图"/>'
+        )
+        payload = {"data": {"document": {"content": source_xml}}}
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(
+            bot, "run_json", return_value=payload
+        ) as run_json_mock:
+            path = bot.prefetch_requirement_source(
+                "https://example.feishu.cn/wiki/requirement",
+                Path(tmpdir),
+            )
+            self.assertEqual(source_xml, path.read_text(encoding="utf-8"))
+
+        args = run_json_mock.call_args.args[0]
+        self.assertEqual("xml", args[args.index("--doc-format") + 1])
+
+    def test_cases_prompt_uses_local_source_without_upload_steps(self):
+        prompt = bot.build_prompt(
+            {
+                "action": "cases",
+                "source": "https://example.feishu.cn/wiki/requirement",
+            },
+            Path("/tmp/job"),
+            "完整需求正文已保存到：/tmp/job/requirement_source.xml",
+        )
+
+        self.assertIn("/tmp/job/requirement_source.xml", prompt)
+        self.assertIn("不要生成或上传最终产物", prompt)
+        self.assertNotIn("sheets +workbook-import", prompt)
+        self.assertNotIn("docs +create", prompt)
+
+    def test_python_finalizes_excel_sheet_and_mindmap(self):
+        example = bot.ROOT / "assets" / "example_cases.json"
+        cases = json.loads(example.read_text(encoding="utf-8"))
+        expected_count = sum(
+            len(sheet.get("cases", []))
+            for sheet in cases.get("sheets", [])
+        )
+
+        def fake_run_case_command(
+            args,
+            job_dir,
+            _job_id,
+            timeout=180,
+            parse_json=False,
+        ):
+            if args[0] == "python3":
+                result = subprocess.run(
+                    args,
+                    cwd=job_dir,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout,
+                )
+                if result.returncode != 0:
+                    self.fail(result.stderr or result.stdout)
+                return result.stdout
+            if "+workbook-import" in args:
+                return {"data": {"url": "https://example.feishu.cn/sheets/sheet1"}}
+            if "+create" in args:
+                return {
+                    "data": {
+                        "document": {
+                            "url": "https://example.feishu.cn/docx/mindmap1"
+                        }
+                    }
+                }
+            self.fail(f"unexpected lark command: {args}")
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            job_dir = Path(tmpdir)
+            (job_dir / "cases.json").write_text(
+                json.dumps(cases, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            with patch.object(bot, "run_coverage_gate", return_value=("pass", "")), \
+                    patch.object(
+                        bot,
+                        "_run_case_command",
+                        side_effect=fake_run_case_command,
+                    ), \
+                    patch.object(bot, "set_job_progress"), \
+                    patch.object(bot, "safe_update_job_card"):
+                result = bot.finalize_case_artifacts(
+                    {"job_id": "job-cases", "action": "cases"},
+                    job_dir,
+                    "结构化用例已生成。",
+                )
+
+            self.assertTrue(any(job_dir.glob("*.xlsx")))
+            self.assertTrue((job_dir / "testpoint_mindmap.xml").exists())
+
+        self.assertIn(f"测试用例：{expected_count} 条", result)
+        self.assertIn("/sheets/sheet1", result)
+        self.assertIn("/docx/mindmap1", result)
 
 
 if __name__ == "__main__":
