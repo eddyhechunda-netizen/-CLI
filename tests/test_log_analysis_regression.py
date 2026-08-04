@@ -5,6 +5,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from openpyxl import load_workbook
+
 from bot import lark_test_bot as bot
 
 
@@ -260,6 +262,14 @@ class DeterministicCasePipelineTests(unittest.TestCase):
 
             self.assertTrue(any(job_dir.glob("*.xlsx")))
             self.assertTrue((job_dir / "testpoint_mindmap.xml").exists())
+            workbook = load_workbook(next(job_dir.glob("*.xlsx")))
+            data_sheet = workbook[workbook.sheetnames[1]]
+            heights = [
+                data_sheet.row_dimensions[row].height
+                for row in range(11, data_sheet.max_row + 1)
+            ]
+            self.assertTrue(all(height >= 30 for height in heights))
+            self.assertTrue(any(height > 30 for height in heights))
 
         self.assertIn(f"测试用例：{expected_count} 条", result)
         self.assertIn("/sheets/sheet1", result)

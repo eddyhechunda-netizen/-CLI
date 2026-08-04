@@ -35,7 +35,9 @@ JSON 结构见同目录 references/cases_schema.md，最小示例：
 """
 import argparse
 import json
+import math
 import sys
+import unicodedata
 
 from openpyxl import Workbook
 from openpyxl.formatting.rule import FormulaRule
@@ -72,6 +74,7 @@ AL_C = Alignment(horizontal="center", vertical="center", wrap_text=True)
 AL_L = Alignment(horizontal="left", vertical="center", wrap_text=True)
 AL_LT = Alignment(horizontal="left", vertical="top", wrap_text=True)
 AL_V = Alignment(vertical="center", wrap_text=True)  # 数据正文：水平默认、垂直居中、自动换行
+AL_DATA = Alignment(horizontal="left", vertical="top", wrap_text=True)
 
 # 数据区表头（第 9 行）与列宽（Excel 字符宽）。
 # 两种布局：
@@ -134,6 +137,27 @@ DATA_START = 11  # 数据起始行
 
 def _fill(color):
     return PatternFill("solid", fgColor=color) if color else PatternFill()
+
+
+def _display_width(value):
+    return sum(
+        2 if unicodedata.east_asian_width(char) in {"W", "F", "A"} else 1
+        for char in str(value or "")
+    )
+
+
+def _wrapped_line_count(value, column_width):
+    lines = str(value or "").splitlines() or [""]
+    usable_width = max(1, int(column_width) - 2)
+    return sum(max(1, math.ceil(_display_width(line) / usable_width)) for line in lines)
+
+
+def _data_row_height(values, columns):
+    line_count = max(
+        _wrapped_line_count(value, columns[index][1])
+        for index, value in enumerate(values)
+    )
+    return min(180, max(30, line_count * 17 + 6))
 
 
 def build_data_sheet(ws, sheet, layout="slim"):
@@ -260,7 +284,10 @@ def build_data_sheet(ws, sheet, layout="slim"):
             if c != 1 and isinstance(val, str) and val[:1] in ("=", "+", "-", "@"):
                 cell.data_type = "s"
             # 序号、功能模块居中；其余左/默认 + 垂直居中自动换行
-            cell.alignment = AL_C if c in (1, 2) else AL_V
+            cell.alignment = AL_C if c in (1, 2) else AL_DATA
+        # Excel/飞书不会可靠地为换行文本自动调整行高，显式按列宽估算，
+        # 避免长前置条件、步骤和预期结果溢出到相邻行。
+        ws.row_dimensions[r].height = _data_row_height(row_vals, columns)
         # 模块合并段落跟踪
         if mod != prev_mod:
             if run_start is not None and r - 1 > run_start:
@@ -276,6 +303,9 @@ def build_data_sheet(ws, sheet, layout="slim"):
     # 执行功能模块列(B)纵向合并；合并后值居中靠上读起来更自然，但模板用居中
     for s, e in merge_runs:
         ws.merge_cells(start_row=s, start_column=2, end_row=e, end_column=2)
+
+    ws.row_dimensions[HEADER_ROW].height = 30
+    ws.row_dimensions[HINT_ROW].height = 48
 
     # 测试结果列使用固定枚举；导入飞书在线表格后可直接下拉选择。
     validation_end = max(DATA_START + len(cases) - 1, DATA_START + 500)
