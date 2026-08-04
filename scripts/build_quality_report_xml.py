@@ -88,9 +88,12 @@ def main():
     parser = argparse.ArgumentParser(description="生成需求质量检查飞书 DocxXML")
     parser.add_argument("review_json")
     parser.add_argument("-o", "--output", required=True)
+    parser.add_argument("--title", help="覆盖在线文档标题")
     args = parser.parse_args()
     with open(args.review_json, encoding="utf-8") as source:
         data = json.load(source)
+    if args.title:
+        data.setdefault("meta", {})["title"] = args.title
     Path(args.output).write_text(build(data), encoding="utf-8")
     print(f"✓ 已生成需求质量检查 XML → {args.output}")
 

@@ -231,10 +231,12 @@ class DeterministicCasePipelineTests(unittest.TestCase):
             if "+workbook-import" in args:
                 return {"data": {"url": "https://example.feishu.cn/sheets/sheet1"}}
             if "+create" in args:
+                content = args[args.index("--content") + 1]
+                doc_id = "quality1" if "质量检查" in content else "mindmap1"
                 return {
                     "data": {
                         "document": {
-                            "url": "https://example.feishu.cn/docx/mindmap1"
+                            "url": f"https://example.feishu.cn/docx/{doc_id}"
                         }
                     }
                 }
@@ -244,6 +246,28 @@ class DeterministicCasePipelineTests(unittest.TestCase):
             job_dir = Path(tmpdir)
             (job_dir / "cases.json").write_text(
                 json.dumps(cases, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            (job_dir / "requirement_source.xml").write_text(
+                "<title>TRON2 柔顺控制需求 V1.0</title>",
+                encoding="utf-8",
+            )
+            (job_dir / "quality_review.json").write_text(
+                json.dumps(
+                    {
+                        "meta": {"title": "质量检查"},
+                        "requirements": [
+                            {
+                                "id": "REQ-001",
+                                "module": "柔顺控制",
+                                "text": "支持柔顺控制",
+                                "testable": True,
+                                "risk": "高",
+                            }
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
                 encoding="utf-8",
             )
             with patch.object(bot, "run_coverage_gate", return_value=("pass", "")), \
@@ -260,8 +284,9 @@ class DeterministicCasePipelineTests(unittest.TestCase):
                     "结构化用例已生成。",
                 )
 
-            self.assertTrue(any(job_dir.glob("*.xlsx")))
-            self.assertTrue((job_dir / "testpoint_mindmap.xml").exists())
+            self.assertTrue((job_dir / "柔顺控制测试用例.xlsx").exists())
+            self.assertTrue((job_dir / "柔顺控制测试点思维导图.xml").exists())
+            self.assertTrue((job_dir / "柔顺控制需求质量检查报告.xml").exists())
             workbook = load_workbook(next(job_dir.glob("*.xlsx")))
             data_sheet = workbook[workbook.sheetnames[1]]
             heights = [
@@ -273,7 +298,21 @@ class DeterministicCasePipelineTests(unittest.TestCase):
 
         self.assertIn(f"测试用例：{expected_count} 条", result)
         self.assertIn("/sheets/sheet1", result)
+        self.assertIn("/docx/quality1", result)
         self.assertIn("/docx/mindmap1", result)
+
+    def test_case_artifact_buttons_are_distinct(self):
+        result = """
+- [柔顺控制测试用例](https://example.feishu.cn/sheets/sheet1)
+- [柔顺控制需求质量检查报告](https://example.feishu.cn/docx/quality1)
+- [柔顺控制测试点思维导图](https://example.feishu.cn/docx/mindmap1)
+""".strip()
+        artifacts = bot.parse_result_artifacts(result, "cases")
+
+        self.assertEqual(
+            ["打开测试用例", "打开质量检查报告", "打开测试点思维导图"],
+            [item["button_label"] for item in artifacts],
+        )
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Queued Feishu test assistant with interactive cards and cancellation."""
 
+import html
 import json
 import logging
 import os
@@ -1566,6 +1567,34 @@ def _safe_artifact_name(value, fallback):
     return (cleaned[:80] or fallback)
 
 
+def _requirement_artifact_name(job_dir, cases):
+    source_path = job_dir / "requirement_source.xml"
+    title = ""
+    if source_path.exists():
+        source = source_path.read_text(encoding="utf-8", errors="replace")
+        match = re.search(r"<title[^>]*>(.*?)</title>", source, re.DOTALL | re.IGNORECASE)
+        if match:
+            title = re.sub(r"<[^>]+>", "", html.unescape(match.group(1))).strip()
+    if not title:
+        quality_path = job_dir / "quality_review.json"
+        if quality_path.exists():
+            try:
+                quality = json.loads(quality_path.read_text(encoding="utf-8"))
+                title = str(quality.get("meta", {}).get("project", "") or "")
+            except json.JSONDecodeError:
+                title = ""
+    if not title:
+        title = str(cases.get("meta", {}).get("project_id", "") or "")
+    title = re.sub(
+        r"\s*(?:需求(?:文档|说明书)?|PRD)\s*(?:V?\d+(?:\.\d+)*)?\s*$",
+        "",
+        title,
+        flags=re.IGNORECASE,
+    )
+    title = re.sub(r"^TRON2[\s_-]*", "", title, flags=re.IGNORECASE)
+    return _safe_artifact_name(title, "测试")
+
+
 def _run_case_command(args, job_dir, job_id, timeout=180, parse_json=False):
     if is_cancel_requested(job_id):
         raise JobCancelled("任务已由用户取消。")
@@ -1634,12 +1663,9 @@ def finalize_case_artifacts(job, job_dir, agent_result):
         cases = json.loads(cases_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise RuntimeError(f"cases.json 无法读取：{exc}") from exc
-    project = _safe_artifact_name(
-        cases.get("meta", {}).get("project_id"),
-        "测试用例",
-    )
+    project = _requirement_artifact_name(job_dir, cases)
     suffix = "-优化版" if job["action"] == "case_refine" else ""
-    xlsx_name = f"{project}-测试用例{suffix}.xlsx"
+    xlsx_name = f"{project}测试用例{suffix}.xlsx"
     xlsx_path = job_dir / xlsx_name
 
     set_job_progress(job["job_id"], "生成表格", "覆盖门禁已通过，正在生成 Excel。")
@@ -1668,7 +1694,7 @@ def finalize_case_artifacts(job, job_dir, agent_result):
             "--file",
             f"./{xlsx_name}",
             "--name",
-            f"{project}-测试用例{suffix}",
+            f"{project}测试用例{suffix}",
             "--as",
             "user",
             "--format",
@@ -1683,17 +1709,60 @@ def finalize_case_artifacts(job, job_dir, agent_result):
     if "/sheets/" not in sheet_url:
         raise RuntimeError("Excel 已生成，但飞书在线表格导入未返回有效链接。")
 
+    set_job_progress(job["job_id"], "生成质量报告", "正在生成需求质量检查报告。")
+    safe_update_job_card(job["job_id"])
+    quality_xml_name = f"{project}需求质量检查报告.xml"
+    _run_artifact_script(
+        [
+            "python3",
+            str(SKILL_DIR / "scripts" / "build_quality_report_xml.py"),
+            "./quality_review.json",
+            "-o",
+            f"./{quality_xml_name}",
+            "--title",
+            f"{project}需求质量检查报告",
+        ],
+        job_dir,
+        job["job_id"],
+    )
+    quality_payload = _run_case_command(
+        [
+            LARK_CLI_BIN,
+            "docs",
+            "+create",
+            "--content",
+            f"@{quality_xml_name}",
+            "--as",
+            "user",
+            "--format",
+            "json",
+        ],
+        job_dir,
+        job["job_id"],
+        timeout=180,
+        parse_json=True,
+    )
+    quality_url = str(
+        payload_data(quality_payload).get("document", {}).get("url", "") or ""
+    )
+    if "/docx/" not in quality_url:
+        raise RuntimeError("质量检查报告已生成，但飞书文档创建未返回有效链接。")
+
     set_job_progress(job["job_id"], "生成思维导图", "正在按测试分类生成测试点思维导图。")
     safe_update_job_card(job["job_id"])
+    mindmap_mmd_name = f"{project}测试点思维导图.mmd"
+    mindmap_xml_name = f"{project}测试点思维导图.xml"
     _run_artifact_script(
         [
             "python3",
             str(SKILL_DIR / "scripts" / "build_testpoint_mindmap.py"),
             "./cases.json",
             "-o",
-            "./testpoint_mindmap.mmd",
+            f"./{mindmap_mmd_name}",
             "--xml",
-            "./testpoint_mindmap.xml",
+            f"./{mindmap_xml_name}",
+            "--title",
+            f"{project}测试点思维导图",
         ],
         job_dir,
         job["job_id"],
@@ -1704,7 +1773,7 @@ def finalize_case_artifacts(job, job_dir, agent_result):
             "docs",
             "+create",
             "--content",
-            "@testpoint_mindmap.xml",
+            f"@{mindmap_xml_name}",
             "--as",
             "user",
             "--format",
@@ -1728,8 +1797,9 @@ def finalize_case_artifacts(job, job_dir, agent_result):
     return (
         "## 最终产物\n"
         f"- 测试用例：{case_count} 条\n"
-        f"- [飞书在线测试用例]({sheet_url})\n"
-        f"- [测试点思维导图]({mindmap_url})\n\n"
+        f"- [{project}测试用例]({sheet_url})\n"
+        f"- [{project}需求质量检查报告]({quality_url})\n"
+        f"- [{project}测试点思维导图]({mindmap_url})\n\n"
         f"{agent_result.strip()}"
     )
 
@@ -1740,10 +1810,10 @@ def validate_job_artifacts(job, result):
     action = job["action"]
     if action in {"cases", "case_refine"}:
         has_sheet = any("/sheets/" in url for url in urls)
-        has_mindmap = any("/docx/" in url for url in urls)
-        if not has_sheet or not has_mindmap:
+        doc_urls = [url for url in urls if "/docx/" in url]
+        if not has_sheet or len(doc_urls) < 2:
             raise RuntimeError(
-                "测试用例任务缺少飞书在线表格或测试点思维导图，"
+                "测试用例任务缺少飞书在线表格、质量检查报告或测试点思维导图，"
                 "已拦截交付并保留中间文件供重试。"
             )
     elif action == "report":
@@ -1771,9 +1841,12 @@ def validate_job_artifacts(job, result):
             job_dir / "requirement.md",
             job_dir / "quality_review.json",
             job_dir / "cases.json",
-            job_dir / "testpoint_mindmap.xml",
         ]
         missing_files = [path.name for path in required_files if not path.exists()]
+        if not any(job_dir.glob("*测试点思维导图.xml")):
+            missing_files.append("*测试点思维导图.xml")
+        if not any(job_dir.glob("*需求质量检查报告.xml")):
+            missing_files.append("*需求质量检查报告.xml")
         if not any(job_dir.glob("*.xlsx")):
             missing_files.append("*.xlsx")
         if missing_files:
@@ -1794,6 +1867,8 @@ def artifact_button_label(title, url, action):
     normalized = title.replace(" ", "")
     if "质量" in normalized:
         return "打开质量检查报告"
+    if "思维导图" in normalized or "测试点" in normalized:
+        return "打开测试点思维导图"
     if "缺陷" in normalized:
         return "下载缺陷清单"
     if "追踪" in normalized:
@@ -1835,6 +1910,19 @@ def parse_result_artifacts(result, action):
             {
                 "title": title,
                 "summary": summary,
+                "url": url,
+                "button_label": artifact_button_label(title, url, action),
+            }
+        )
+        seen_urls.add(url)
+    for match in re.finditer(r"\[([^\]]+)\]\((https?://[^)\s]+)\)", result or ""):
+        title, url = match.group(1).strip(), match.group(2).rstrip("。，；、)")
+        if url in seen_urls:
+            continue
+        artifacts.append(
+            {
+                "title": title,
+                "summary": "",
                 "url": url,
                 "button_label": artifact_button_label(title, url, action),
             }

@@ -42,13 +42,15 @@ def main():
     parser.add_argument("cases")
     parser.add_argument("-o", "--output", required=True)
     parser.add_argument("--xml", required=True)
+    parser.add_argument("--title", help="覆盖思维导图标题")
     args = parser.parse_args()
 
     data = json.loads(Path(args.cases).read_text(encoding="utf-8"))
     project, category_count, total, mermaid = build(data)
+    title = clean(args.title) or f"{project} 测试点思维导图"
     Path(args.output).write_text(mermaid, encoding="utf-8")
     xml = (
-        f"<title>{escape(project)} 测试点思维导图</title>\n"
+        f"<title>{escape(title)}</title>\n"
         f"<p>按「分类 → 功能模块 → 测试点」自动汇总，共 "
         f"{category_count} 个分类、{total} 个测试点。</p>\n"
         '<whiteboard type="mermaid">\n'
