@@ -200,6 +200,46 @@ class CorrectionLoopRegressionTests(unittest.TestCase):
         self.assertNotIn("incomplete answer", revision_prompt)
 
 
+class CompletionInteractionTests(unittest.TestCase):
+    def test_completion_image_replies_as_bot_with_relative_asset_path(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            image_path = Path(tmpdir) / "complete.jpg"
+            image_path.write_bytes(b"image")
+            with patch.object(bot, "run_json", return_value={"ok": True}) as run_json:
+                bot.reply_image("om_source", image_path, "job-complete-fun")
+
+        args = run_json.call_args.args[0]
+        self.assertIn("+messages-reply", args)
+        self.assertEqual("om_source", args[args.index("--message-id") + 1])
+        self.assertEqual("./complete.jpg", args[args.index("--image") + 1])
+        self.assertEqual("bot", args[args.index("--as") + 1])
+        self.assertEqual(image_path.parent, run_json.call_args.kwargs["cwd"])
+
+    def test_completion_image_failure_does_not_change_job_result(self):
+        job = {
+            "job_id": "job_123",
+            "status": "done",
+            "source_message_id": "om_source",
+        }
+        with self.assertLogs(level="ERROR"), patch.object(
+            bot,
+            "reply_image",
+            side_effect=RuntimeError("upload failed"),
+        ):
+            bot.safe_reply_completion_fun_image(job)
+
+    def test_non_done_job_does_not_send_completion_image(self):
+        job = {
+            "job_id": "job_123",
+            "status": "failed",
+            "source_message_id": "om_source",
+        }
+        with patch.object(bot, "reply_image") as reply_image:
+            bot.safe_reply_completion_fun_image(job)
+
+        reply_image.assert_not_called()
+
+
 class DeterministicCasePipelineTests(unittest.TestCase):
     def test_prefetch_preserves_complete_xml(self):
         source_xml = (

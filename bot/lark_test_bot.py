@@ -28,6 +28,12 @@ SKILL_DIR = Path(
     os.environ.get("LARK_TEST_BOT_SKILL_DIR", str(ROOT))
 ).expanduser().resolve()
 DB_PATH = STATE_DIR / "bot.db"
+COMPLETION_FUN_IMAGE = Path(
+    os.environ.get(
+        "LARK_TEST_BOT_COMPLETION_FUN_IMAGE",
+        str(ROOT / "assets" / "task_complete_fun.jpg"),
+    )
+).expanduser().resolve()
 
 COPILOT_BIN = os.environ.get("COPILOT_BIN", "copilot")
 LARK_CLI_BIN = os.environ.get("LARK_CLI_BIN", "lark-cli")
@@ -2182,6 +2188,47 @@ def reply_card(message_id, card, suffix):
     )
     data = payload_data(payload)
     return data.get("message_id") or data.get("id")
+
+
+def reply_image(message_id, image_path, suffix):
+    image_path = Path(image_path).expanduser().resolve()
+    if not image_path.is_file():
+        raise RuntimeError(f"互动图片不存在：{image_path}")
+    key = f"{message_id[-30:]}-{suffix}"[:50]
+    return run_json(
+        [
+            LARK_CLI_BIN,
+            "im",
+            "+messages-reply",
+            "--message-id",
+            message_id,
+            "--image",
+            f"./{image_path.name}",
+            "--idempotency-key",
+            key,
+            "--as",
+            "bot",
+            "--format",
+            "json",
+        ],
+        cwd=image_path.parent,
+    )
+
+
+def safe_reply_completion_fun_image(job):
+    if not job or job["status"] != "done" or not job["source_message_id"]:
+        return
+    try:
+        reply_image(
+            job["source_message_id"],
+            COMPLETION_FUN_IMAGE,
+            f"{job['job_id'][-16:]}-complete-fun",
+        )
+    except Exception:
+        logging.exception(
+            "failed to send completion fun image for job: %s",
+            job["job_id"],
+        )
 
 
 def patch_card(message_id, card):
@@ -5119,6 +5166,7 @@ def worker_loop(worker_name, job_queue):
             set_job_progress(job_id, "失败", "任务处理失败。")
         finally:
             safe_update_job_card(job_id)
+            safe_reply_completion_fun_image(get_job(job_id=job_id))
             job_queue.task_done()
 
 
