@@ -205,6 +205,60 @@ class PreprocessingRegressionTests(unittest.TestCase):
         self.assertIn("[90]=1", answer)
         bot.validate_log_analysis_answer("\n".join(ethercat), answer)
 
+    def test_slave1_uplink_lost_reports_branch_topology_root_cause(self):
+        snowball = [
+            "2026-08-08 11:12:00.203 E/snowball(mroslaunch)(1/1): >>>>>|ecm err|",
+            "2026-08-08 11:12:28.825 I/snowball(mroslaunch)(1/1): ethercat ok! ecm ok",
+        ]
+        motor_warnings = [
+            f"2026-08-08 11:12:00.200 W/ethercat(mroslaunch)(1/1): "
+            f"motor{motor} something happened, "
+            f"statusword {'0xffff' if motor == 10 else '0x0'} code 0xf"
+            for motor in range(1, 11)
+        ]
+        enable_lines = [
+            f"2026-08-08 11:12:28.800 I/ethercat(mroslaunch)(1/1): "
+            f"Motor {motor} (slave {motor + 1}) enabled successfully."
+            for motor in range(1, 11)
+        ]
+        ethercat = [
+            *motor_warnings,
+            "2026-08-08 11:12:00.202 E/ethercat(mroslaunch)(1/1): "
+            "Motor = 65535, 0xf10b, Too many loss.",
+            "2026-08-08 11:12:11.428 I/ethercat(mroslaunch)(1/1): Slave1",
+            "2026-08-08 11:12:11.429 I/ethercat(mroslaunch)(1/1): "
+            "[90] 'EtherCAT lost link cnt of port1': 1",
+            *enable_lines,
+        ]
+
+        answer = bot.render_motor_triggered_comm_drop(snowball, ethercat)
+
+        self.assertIn("[90]=1 on Slave 1", answer)
+        self.assertIn("分支器A", answer)
+        self.assertIn("通信掉线（暂时性）", answer)
+        self.assertIn("分支A下游", answer)
+        self.assertIn("分支B因级联效应", answer)
+        self.assertIn("Slave 1 port1=1", answer)
+        for motor in range(1, 11):
+            self.assertIn(f"电机{motor}", answer)
+        bot.validate_log_analysis_answer("\n".join(ethercat), answer)
+
+    def test_attribute_lost_link_counters_maps_to_slave(self):
+        ethercat = [
+            "2026-08-08 11:12:11.428 I/ethercat(mroslaunch)(1/1): Slave1",
+            "2026-08-08 11:12:11.429 I/ethercat(mroslaunch)(1/1): "
+            "[90] 'EtherCAT lost link cnt of port1': 1",
+            "2026-08-08 11:12:11.434 I/ethercat(mroslaunch)(1/1): Slave6",
+            "2026-08-08 11:12:11.434 I/ethercat(mroslaunch)(1/1): "
+            "[8f] 'EtherCAT lost link cnt of port0': 1",
+            "2026-08-08 11:12:11.434 I/ethercat(mroslaunch)(1/1): "
+            "[91] 'EtherCAT lost link cnt of port2': 0",
+        ]
+        attributed = bot.attribute_lost_link_counters(ethercat)
+        self.assertIn((1, 1, "port1", 1), attributed)
+        self.assertIn((6, 0, "port0", 1), attributed)
+        self.assertNotIn((6, 2, "port2", 0), attributed)
+
 
 class CorrectionLoopRegressionTests(unittest.TestCase):
     class FakeProcess:
@@ -265,46 +319,6 @@ class CorrectionLoopRegressionTests(unittest.TestCase):
         self.assertIn("missing motor9", revision_prompt)
         self.assertNotIn("FULL ORIGINAL PROMPT", revision_prompt)
         self.assertNotIn("incomplete answer", revision_prompt)
-
-
-class CompletionInteractionTests(unittest.TestCase):
-    def test_completion_image_replies_as_bot_with_relative_asset_path(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            image_path = Path(tmpdir) / "complete.jpg"
-            image_path.write_bytes(b"image")
-            with patch.object(bot, "run_json", return_value={"ok": True}) as run_json:
-                bot.reply_image("om_source", image_path, "job-complete-fun")
-
-        args = run_json.call_args.args[0]
-        self.assertIn("+messages-reply", args)
-        self.assertEqual("om_source", args[args.index("--message-id") + 1])
-        self.assertEqual("./complete.jpg", args[args.index("--image") + 1])
-        self.assertEqual("bot", args[args.index("--as") + 1])
-        self.assertEqual(image_path.parent, run_json.call_args.kwargs["cwd"])
-
-    def test_completion_image_failure_does_not_change_job_result(self):
-        job = {
-            "job_id": "job_123",
-            "status": "done",
-            "source_message_id": "om_source",
-        }
-        with self.assertLogs(level="ERROR"), patch.object(
-            bot,
-            "reply_image",
-            side_effect=RuntimeError("upload failed"),
-        ):
-            bot.safe_reply_completion_fun_image(job)
-
-    def test_non_done_job_does_not_send_completion_image(self):
-        job = {
-            "job_id": "job_123",
-            "status": "failed",
-            "source_message_id": "om_source",
-        }
-        with patch.object(bot, "reply_image") as reply_image:
-            bot.safe_reply_completion_fun_image(job)
-
-        reply_image.assert_not_called()
 
 
 class OperationsRegressionTests(unittest.TestCase):

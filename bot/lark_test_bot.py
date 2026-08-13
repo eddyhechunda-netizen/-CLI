@@ -28,12 +28,6 @@ SKILL_DIR = Path(
     os.environ.get("LARK_TEST_BOT_SKILL_DIR", str(ROOT))
 ).expanduser().resolve()
 DB_PATH = STATE_DIR / "bot.db"
-COMPLETION_FUN_IMAGE = Path(
-    os.environ.get(
-        "LARK_TEST_BOT_COMPLETION_FUN_IMAGE",
-        str(ROOT / "assets" / "task_complete_fun.jpg"),
-    )
-).expanduser().resolve()
 
 COPILOT_BIN = os.environ.get("COPILOT_BIN", "copilot")
 LARK_CLI_BIN = os.environ.get("LARK_CLI_BIN", "lark-cli")
@@ -2243,47 +2237,6 @@ def reply_card(message_id, card, suffix):
     return data.get("message_id") or data.get("id")
 
 
-def reply_image(message_id, image_path, suffix):
-    image_path = Path(image_path).expanduser().resolve()
-    if not image_path.is_file():
-        raise RuntimeError(f"互动图片不存在：{image_path}")
-    key = f"{message_id[-30:]}-{suffix}"[:50]
-    return run_json(
-        [
-            LARK_CLI_BIN,
-            "im",
-            "+messages-reply",
-            "--message-id",
-            message_id,
-            "--image",
-            f"./{image_path.name}",
-            "--idempotency-key",
-            key,
-            "--as",
-            "bot",
-            "--format",
-            "json",
-        ],
-        cwd=image_path.parent,
-    )
-
-
-def safe_reply_completion_fun_image(job):
-    if not job or job["status"] != "done" or not job["source_message_id"]:
-        return
-    try:
-        reply_image(
-            job["source_message_id"],
-            COMPLETION_FUN_IMAGE,
-            f"{job['job_id'][-16:]}-complete-fun",
-        )
-    except Exception:
-        logging.exception(
-            "failed to send completion fun image for job: %s",
-            job["job_id"],
-        )
-
-
 def patch_card(message_id, card):
     body = {"content": json.dumps(card, ensure_ascii=False)}
     run_json(
@@ -4344,6 +4297,41 @@ def _format_motor_groups(incidents):
     return "；".join(parts)
 
 
+LOST_LINK_PORT_MAP = {
+    "8f": (0, "port0"),
+    "90": (1, "port1"),
+    "91": (2, "port2"),
+    "92": (3, "port3"),
+}
+
+# EtherCAT 网络拓扑（轮足/双足形态）：分支器 A=Slave 1、分支器 B(CU1128)=Slave 7；
+# 分支 A 下游 电机1-5=Slave 2-6，分支 B 下游 电机6-10=Slave 8-12。
+BRANCH_A_MOTOR_TO_SLAVE = {motor: motor + 1 for motor in range(1, 6)}
+BRANCH_B_MOTOR_TO_SLAVE = {motor: motor + 2 for motor in range(6, 11)}
+
+
+def attribute_lost_link_counters(ethercat_lines):
+    """把非零 lost link 计数归属到对应从站，返回 [(slave, port_idx, port_name, value)]。"""
+    results = []
+    current_slave = None
+    for line in ethercat_lines:
+        slave_match = re.search(r"\bSlave(\d+)\b", line)
+        if slave_match:
+            current_slave = int(slave_match.group(1))
+        counter_match = re.search(
+            r"\[\s*(8f|90|91|92)\s*\].*lost link cnt of (port\d).*:\s*([1-9]\d*)\s*$",
+            line,
+            re.IGNORECASE,
+        )
+        if counter_match and current_slave is not None:
+            register = counter_match.group(1).lower()
+            port_idx, port_name = LOST_LINK_PORT_MAP[register]
+            entry = (current_slave, port_idx, port_name, int(counter_match.group(3)))
+            if entry not in results:
+                results.append(entry)
+    return results
+
+
 def render_motor_triggered_comm_drop(snowball_lines, ethercat_lines):
     """电机批量告警后紧接 Too many loss 时给出稳定的确定性通信掉线结论。"""
     warning_events = []
@@ -4397,6 +4385,11 @@ def render_motor_triggered_comm_drop(snowball_lines, ethercat_lines):
             if counter not in nonzero_counters:
                 nonzero_counters.append(counter)
 
+    attributed = attribute_lost_link_counters(ethercat_lines)
+    slave1_uplink_lost = any(
+        slave == 1 and port_idx == 1 for slave, port_idx, _name, _value in attributed
+    )
+
     affected_motors = {motor for motor, _statusword, _code in incidents}
     enabled_after = set()
     for line in ethercat_lines:
@@ -4428,6 +4421,22 @@ def render_motor_triggered_comm_drop(snowball_lines, ethercat_lines):
         conclusion = "通信掉线后截至日志末尾未完全恢复"
         recovery_text = "截至日志末尾缺少全部受影响电机重新使能及 ECM 恢复证据"
         marker = "❌"
+
+    # 命中 [90]=1 on Slave 1（主站↔分支器A端口1链路硬件掉线）时给出拓扑根因定位。
+    if slave1_uplink_lost:
+        return _render_slave1_uplink_comm_drop(
+            trigger_time=trigger_time,
+            affected_motors=affected_motors,
+            attributed=attributed,
+            counter_text=counter_text,
+            status_text=status_text,
+            recovered=recovered,
+            recovery_time=recovery_time,
+            marker=marker,
+            conclusion=conclusion,
+            recovery_text=recovery_text,
+        )
+
     return f"""
 **{marker} 结论：EtherCAT 异常由电机批量通信状态异常后触发 `Too many loss`，属于通信掉线，不是遥控器手动掉电；{conclusion}。**
 
@@ -4440,6 +4449,86 @@ def render_motor_triggered_comm_drop(snowball_lines, ethercat_lines):
 ## 排查建议
 - 检查 EtherCAT 分支器、上联线束和接插件，重点排查非零 lost link 计数对应端口。
 - 若再次出现，保留异常前后 30 秒 ethercat 日志，并检查供电波动和分支链路接触状态。
+""".strip()
+
+
+def _render_slave1_uplink_comm_drop(
+    *,
+    trigger_time,
+    affected_motors,
+    attributed,
+    counter_text,
+    status_text,
+    recovered,
+    recovery_time,
+    marker,
+    conclusion,
+    recovery_text,
+):
+    """[90]=1 on Slave 1 场景：主站↔分支器A端口1链路硬件掉线导致级联全网掉线。"""
+    motors = sorted(affected_motors)
+    motor_enum = "、".join(f"电机{motor}" for motor in motors)
+    branch_a_motors = [motor for motor in motors if motor in BRANCH_A_MOTOR_TO_SLAVE]
+    branch_b_motors = [motor for motor in motors if motor in BRANCH_B_MOTOR_TO_SLAVE]
+
+    def _slave_span(mapping, motor_list):
+        slaves = sorted(mapping[m] for m in motor_list)
+        if not slaves:
+            return ""
+        return f"Slave {slaves[0]}-{slaves[-1]}"
+
+    branch_a_slaves = _slave_span(BRANCH_A_MOTOR_TO_SLAVE, branch_a_motors)
+    branch_b_slaves = _slave_span(BRANCH_B_MOTOR_TO_SLAVE, branch_b_motors)
+    branch_a_text = (
+        f"分支A下游（{branch_a_slaves} = "
+        f"{'、'.join(f'电机{m}' for m in branch_a_motors)}）全部掉线"
+        if branch_a_motors
+        else ""
+    )
+    branch_b_text = (
+        f"分支B因级联效应（{branch_b_slaves} = "
+        f"{'、'.join(f'电机{m}' for m in branch_b_motors)}）全部掉线"
+        if branch_b_motors
+        else ""
+    )
+    scope_parts = [part for part in (branch_a_text, branch_b_text) if part]
+    scope_text = "；".join(scope_parts)
+
+    attributed_text = "、".join(
+        f"Slave {slave} {name}={value}"
+        for slave, _idx, name, value in attributed
+    ) or "日志未提取到非零 lost link 计数"
+
+    trigger_reasons = [
+        "`[90]=1 on Slave 1`：Master 与分支器A(Slave 1)端口1之间链路发生过硬件掉线（根因）。",
+    ]
+    if branch_a_text:
+        trigger_reasons.append(f"{branch_a_text}。")
+    if branch_b_text:
+        trigger_reasons.append(f"{branch_b_text}。")
+    trigger_block = "\n".join(
+        f"{index}. {reason}" for index, reason in enumerate(trigger_reasons, start=1)
+    )
+
+    return f"""
+**{marker} 结论：EtherCAT 异常为暂时性通信掉线（并非遥控器手动掉电）：主站与分支器A(Slave 1)端口1链路发生过硬件掉线（`[90]=1 on Slave 1`），导致分支A下游及分支B级联全部掉线；{conclusion}。**
+
+## 最终结论
+- **问题类型**：通信掉线（暂时性）
+- **触发时间**：{_fmt_dt(trigger_time)}
+- **受影响电机**：{motor_enum}
+- **状态字证据**：{status_text}
+- **受影响范围**：全网（12 个从站）— `[90]=1 on Slave 1`，Master 与分支器A端口1之间链路丢失，{scope_text}
+- **链路证据**：{attributed_text}
+- **后续状态**：{recovery_text}
+
+## 触发原因
+{trigger_block}
+
+## 排查建议
+- 重点检查 Master 与分支器A(Slave 1)之间的上联线束、接插件和分支器A本身，`[90]` 对应 port1 上联端口。
+- 检查各非零 lost link 计数对应端口，排查供电波动和分支链路接触状态。
+- 若再次出现，保留异常前后 30 秒 ethercat 日志，确认是否为分支器A上联链路间歇性接触不良。
 """.strip()
 
 
@@ -5506,7 +5595,6 @@ def worker_loop(worker_name, job_queue):
             set_job_progress(job_id, "失败", "任务处理失败。")
         finally:
             safe_update_job_card(job_id)
-            safe_reply_completion_fun_image(get_job(job_id=job_id))
             job_queue.task_done()
 
 
