@@ -108,7 +108,7 @@ LOG_MAX_ACTIVE_PER_USER = int(
     os.environ.get("LARK_TEST_BOT_LOG_MAX_ACTIVE_PER_USER", "1")
 )
 MAX_GLOBAL_QUEUED = int(os.environ.get("LARK_TEST_BOT_MAX_GLOBAL_QUEUED", "100"))
-DATA_RETENTION_DAYS = int(os.environ.get("LARK_TEST_BOT_DATA_RETENTION_DAYS", "30"))
+DATA_RETENTION_DAYS = int(os.environ.get("LARK_TEST_BOT_DATA_RETENTION_DAYS", "2"))
 CLEANUP_INTERVAL = int(
     os.environ.get("LARK_TEST_BOT_CLEANUP_INTERVAL", str(6 * 60 * 60))
 )
@@ -629,33 +629,86 @@ def delete_user_local_data(sender_id, preserve_message_id=None):
     return delete_local_jobs([row["job_id"] for row in rows])
 
 
+def retention_cutoff_timestamp(now=None):
+    """按本地自然日保留今天及前 N-1 天，默认删除前天及更早缓存。"""
+    current = datetime.fromtimestamp(now if now is not None else time.time())
+    start_today = current.replace(hour=0, minute=0, second=0, microsecond=0)
+    cutoff_day = start_today - timedelta(days=max(0, DATA_RETENTION_DAYS - 1))
+    return int(cutoff_day.timestamp())
+
+
+def cleanup_orphan_job_dirs(cutoff, retained_job_ids):
+    """清理数据库中已不存在且超过保留期的任务/暂存目录。"""
+    if not JOBS_DIR.exists():
+        return 0
+    retained = set(retained_job_ids)
+    removed = 0
+    for path in JOBS_DIR.iterdir():
+        if not (
+            path.name.startswith("job_")
+            or path.name.startswith("_staging_")
+        ):
+            continue
+        try:
+            modified_at = path.lstat().st_mtime
+        except FileNotFoundError:
+            continue
+        if path.name in retained or modified_at >= cutoff:
+            continue
+        if path.is_symlink():
+            path.unlink()
+        elif path.is_dir():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+        removed += 1
+    return removed
+
+
 def cleanup_expired_data():
     if DATA_RETENTION_DAYS <= 0:
         return 0
-    cutoff = int(time.time()) - DATA_RETENTION_DAYS * 24 * 60 * 60
+    cutoff = retention_cutoff_timestamp()
     with connect_db() as db:
         rows = db.execute(
             """
             SELECT job_id FROM jobs
-            WHERE created_at<?
+            WHERE COALESCE(finished_at, updated_at, created_at)<?
               AND status NOT IN ('queued', 'running', 'cancel_requested')
             """,
             (cutoff,),
         ).fetchall()
-        db.execute("DELETE FROM messages WHERE created_at<?", (cutoff,))
+        db.execute(
+            """
+            DELETE FROM messages
+            WHERE created_at<?
+              AND NOT EXISTS (
+                  SELECT 1 FROM jobs
+                  WHERE jobs.source_message_id=messages.message_id
+              )
+            """,
+            (cutoff,),
+        )
         db.execute("DELETE FROM chats WHERE updated_at<?", (cutoff,))
         db.execute(
             "DELETE FROM ai_usage WHERE finished_at IS NOT NULL AND finished_at<?",
             (cutoff,),
         )
     deleted = delete_local_jobs([row["job_id"] for row in rows])
-    if deleted:
+    with connect_db() as db:
+        retained_job_ids = [
+            row["job_id"] for row in db.execute("SELECT job_id FROM jobs").fetchall()
+        ]
+    orphaned = cleanup_orphan_job_dirs(cutoff, retained_job_ids)
+    if deleted or orphaned:
         logging.info(
-            "privacy cleanup removed %s expired job(s), retention=%s days",
+            "privacy cleanup removed %s expired job(s) and %s orphan cache dir(s), "
+            "retention=%s calendar days",
             deleted,
+            orphaned,
             DATA_RETENTION_DAYS,
         )
-    return deleted
+    return deleted + orphaned
 
 
 def cleanup_loop():
@@ -2848,6 +2901,60 @@ def selection_card(job_id, source):
     return card
 
 
+def job_stage_progress(stage, status):
+    progress = {
+        "等待选择": 0,
+        "排队": 5,
+        "下载文件": 10,
+        "思考": 35,
+        "读取文档": 15,
+        "读取日志": 15,
+        "读取用例": 15,
+        "检索文档": 40,
+        "整理": 35,
+        "分析需求": 35,
+        "分析日志": 55,
+        "生成内容": 60,
+        "生成报告": 60,
+        "生成记录表": 70,
+        "校验用例": 75,
+        "校正结论": 75,
+        "创建文档": 90,
+        "更新文档": 90,
+        "导入表格": 90,
+        "更新目录": 95,
+        "更新边框": 96,
+        "更新交互": 98,
+        "自动重试": 10,
+        "取消任务": 95,
+        "已完成": 100,
+        "已取消": 100,
+        "失败": 100,
+    }.get(stage, 10 if status == "running" else 0)
+    if status == "queued":
+        return 5
+    if status in {"done", "cancelled", "failed"}:
+        return 100
+    return progress
+
+
+def running_job_health(heartbeat_age, process_running, worker_running, startup_age):
+    heartbeat_fresh = heartbeat_age <= max(30, STATUS_REFRESH_INTERVAL * 3)
+    startup_grace = (
+        not process_running
+        and startup_age is not None
+        and startup_age <= max(15, STATUS_REFRESH_INTERVAL * 2)
+    )
+    transition_grace = (
+        not process_running
+        and heartbeat_age <= max(5, STATUS_REFRESH_INTERVAL)
+    )
+    healthy = heartbeat_fresh and (
+        process_running or worker_running or startup_grace or transition_grace
+    )
+    return healthy, startup_grace
+
+
 def job_card(job):
     status = job["status"]
     templates = {
@@ -2920,23 +3027,16 @@ def job_card(job):
             if worker_name.startswith(worker_prefix)
         )
     if status == "running":
-        heartbeat_fresh = heartbeat_age <= max(30, STATUS_REFRESH_INTERVAL * 3)
         startup_age = (
             max(0, now - job["started_at"])
             if job["started_at"]
             else None
         )
-        startup_grace = (
-            not process_running
-            and startup_age is not None
-            and startup_age <= max(15, STATUS_REFRESH_INTERVAL * 2)
-        )
-        transition_grace = (
-            not process_running
-            and heartbeat_age <= max(5, STATUS_REFRESH_INTERVAL)
-        )
-        healthy = heartbeat_fresh and (
-            process_running or startup_grace or transition_grace
+        healthy, startup_grace = running_job_health(
+            heartbeat_age,
+            process_running,
+            worker_running,
+            startup_age,
         )
         if startup_grace:
             health_text = "任务启动中"
@@ -2959,29 +3059,7 @@ def job_card(job):
         health_icon = "🔴"
 
     stage = latest_job_stage(job["job_id"])
-    stage_progress = {
-        "等待选择": 0,
-        "排队": 5,
-        "下载文件": 10,
-        "下载文件": 10,
-        "思考": 60,
-        "读取文档": 15,
-        "读取用例": 15,
-        "整理": 35,
-        "分析需求": 35,
-        "生成内容": 60,
-        "生成报告": 60,
-        "生成记录表": 70,
-        "校验用例": 75,
-        "创建文档": 90,
-        "更新文档": 90,
-        "导入表格": 90,
-        "更新目录": 95,
-        "取消任务": 95,
-        "已完成": 100,
-        "已取消": 100,
-        "失败": 100,
-    }.get(stage, 10 if status == "running" else 0)
+    stage_progress = job_stage_progress(stage, status)
     filled = min(10, max(0, (stage_progress + 9) // 10))
     progress_bar = "■" * filled + "□" * (10 - filled)
     metrics = [
@@ -3844,21 +3922,109 @@ def _extract_node_lines(file_path, node):
     return lines, matched_total, truncated
 
 
+ETHERCAT_DIAGNOSTIC_PATTERNS = (
+    "found 12 slaves",
+    "enabled successfully",
+    "failed to enable motor",
+    "statusword",
+    "link_status",
+    "ret = -3",
+    "ethercat lost link cnt",
+    "ethercat error rx frames",
+    "slave 12 is in safe_op",
+    "ethercat exit",
+    "ec master exited",
+)
+
+
+def _finalize_node_capture(head, tail, matched_total, cap):
+    truncated = matched_total > cap
+    if truncated:
+        omitted = matched_total - len(head) - len(tail)
+        lines = head + [
+            f"    …（命中行数过多，此处省略中间约 {omitted} 行，仅保留头尾骨架）…"
+        ] + list(tail)
+    else:
+        lines = head + list(tail)
+    return lines, matched_total, truncated
+
+
+def extract_log_evidence(file_path, heartbeat=None):
+    """单次流式扫描，同时提取 snowball、ethercat 和 EtherCAT 诊断证据。"""
+    file_path = Path(file_path)
+    cap = max(LOG_ANALYSIS_MAX_MATCH_LINES, 2)
+    head_cap = cap // 2
+    tail_cap = cap - head_cap
+    node_tokens = {
+        "snowball": f"/{(LOG_ANALYSIS_NODE or 'snowball').lower()}(",
+        "ethercat": f"/{(LOG_ANALYSIS_ETHERCAT_NODE or 'ethercat').lower()}(",
+    }
+    captures = {
+        name: {
+            "head": [],
+            "tail": deque(maxlen=tail_cap),
+            "total": 0,
+        }
+        for name in node_tokens
+    }
+    diagnostic_lines = []
+    next_heartbeat = 0.0
+
+    def pulse(force=False):
+        nonlocal next_heartbeat
+        if heartbeat is None:
+            return
+        now = time.monotonic()
+        if not force and now < next_heartbeat:
+            return
+        try:
+            heartbeat()
+        except Exception:
+            logging.exception("failed to refresh heartbeat during log extraction")
+        next_heartbeat = now + max(1, min(5, STATUS_REFRESH_INTERVAL))
+
+    pulse(force=True)
+    try:
+        with file_path.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                pulse()
+                lowered = line.lower()
+                stripped = None
+                for name, token in node_tokens.items():
+                    if token not in lowered:
+                        continue
+                    capture = captures[name]
+                    capture["total"] += 1
+                    if stripped is None:
+                        stripped = line.rstrip("\n")
+                    if len(capture["head"]) < head_cap:
+                        capture["head"].append(stripped)
+                    else:
+                        capture["tail"].append(stripped)
+                    if name == "ethercat" and any(
+                        pattern in lowered
+                        for pattern in ETHERCAT_DIAGNOSTIC_PATTERNS
+                    ):
+                        diagnostic_lines.append(stripped)
+                    break
+    except OSError as exc:
+        raise RuntimeError(f"无法读取上传的日志文件：{exc}")
+    finally:
+        pulse(force=True)
+
+    result = {"diagnostic": diagnostic_lines}
+    for name, capture in captures.items():
+        result[name] = _finalize_node_capture(
+            capture["head"],
+            capture["tail"],
+            capture["total"],
+            cap,
+        )
+    return result
+
+
 def _extract_ethercat_diagnostic_lines(file_path):
     """Stream the full file and retain only EtherCAT lines needed for root-cause rules."""
-    patterns = (
-        "found 12 slaves",
-        "enabled successfully",
-        "failed to enable motor",
-        "statusword",
-        "link_status",
-        "ret = -3",
-        "ethercat lost link cnt",
-        "ethercat error rx frames",
-        "slave 12 is in safe_op",
-        "ethercat exit",
-        "ec master exited",
-    )
     lines = []
     token = f"/{(LOG_ANALYSIS_ETHERCAT_NODE or 'ethercat').lower()}("
     try:
@@ -3867,7 +4033,10 @@ def _extract_ethercat_diagnostic_lines(file_path):
                 lowered = line.lower()
                 if token not in lowered:
                     continue
-                if any(pattern in lowered for pattern in patterns):
+                if any(
+                    pattern in lowered
+                    for pattern in ETHERCAT_DIAGNOSTIC_PATTERNS
+                ):
                     lines.append(line.rstrip("\n"))
     except OSError as exc:
         raise RuntimeError(f"无法读取上传的日志文件：{exc}")
@@ -4158,6 +4327,122 @@ def render_persistent_comm_drop_log_analysis(snowball_lines, ethercat_lines):
 """.strip()
 
 
+def _format_motor_groups(incidents):
+    groups = {}
+    for motor, statusword, code in incidents:
+        groups.setdefault((statusword, code), []).append(motor)
+    parts = []
+    for (statusword, code), motors in sorted(groups.items()):
+        motors = sorted(set(motors))
+        consecutive = motors == list(range(motors[0], motors[-1] + 1))
+        motor_text = (
+            f"电机{motors[0]}-{motors[-1]}"
+            if consecutive and len(motors) > 1
+            else "、".join(f"电机{motor}" for motor in motors)
+        )
+        parts.append(f"{motor_text}：`statusword {statusword} / code {code}`")
+    return "；".join(parts)
+
+
+def render_motor_triggered_comm_drop(snowball_lines, ethercat_lines):
+    """电机批量告警后紧接 Too many loss 时给出稳定的确定性通信掉线结论。"""
+    warning_events = []
+    loss_events = []
+    for line in ethercat_lines:
+        timestamp = parse_log_time(line)
+        if not timestamp:
+            continue
+        warning = ETHERCAT_MOTOR_WARNING_RE.search(line)
+        if warning:
+            warning_events.append(
+                (
+                    timestamp,
+                    int(warning.group(1)),
+                    warning.group(2).lower(),
+                    warning.group(3).lower(),
+                )
+            )
+        if "too many loss" in line.lower():
+            loss_events.append(timestamp)
+    trigger_time = next(
+        (
+            loss_time
+            for loss_time in loss_events
+            if any(
+                0 <= (loss_time - warning_time).total_seconds() <= 2
+                for warning_time, _motor, _statusword, _code in warning_events
+            )
+        ),
+        None,
+    )
+    if trigger_time is None:
+        return None
+    incidents = {
+        (motor, statusword, code)
+        for warning_time, motor, statusword, code in warning_events
+        if 0 <= (trigger_time - warning_time).total_seconds() <= 2
+    }
+    if not incidents:
+        return None
+
+    nonzero_counters = []
+    for line in ethercat_lines:
+        match = re.search(
+            r"\[\s*(8f|90|91|92)\s*\].*:\s*([1-9]\d*)\s*$",
+            line,
+            re.IGNORECASE,
+        )
+        if match:
+            counter = f"[{match.group(1).lower()}]={match.group(2)}"
+            if counter not in nonzero_counters:
+                nonzero_counters.append(counter)
+
+    affected_motors = {motor for motor, _statusword, _code in incidents}
+    enabled_after = set()
+    for line in ethercat_lines:
+        timestamp = parse_log_time(line)
+        if not timestamp or timestamp <= trigger_time:
+            continue
+        enabled = ETHERCAT_MOTOR_ENABLE_RE.search(line)
+        if enabled:
+            enabled_after.add(int(enabled.group(1)))
+    recovery_times = [
+        parse_log_time(line)
+        for line in snowball_lines
+        if ECM_RECOVERED_RE.search(line)
+        and parse_log_time(line)
+        and parse_log_time(line) > trigger_time
+    ]
+    recovered = affected_motors.issubset(enabled_after) and bool(recovery_times)
+    recovery_time = min(recovery_times) if recovery_times else None
+    status_text = _format_motor_groups(incidents)
+    counter_text = "、".join(nonzero_counters) or "日志未提取到非零 lost link 计数"
+    if recovered:
+        conclusion = "通信掉线后主站重启并恢复，受影响电机均重新使能成功"
+        recovery_text = (
+            f"{_fmt_dt(recovery_time)} 出现 `ethercat ok/ecm ok`，"
+            f"电机{min(affected_motors)}-{max(affected_motors)} 均重新使能成功"
+        )
+        marker = "⚠️"
+    else:
+        conclusion = "通信掉线后截至日志末尾未完全恢复"
+        recovery_text = "截至日志末尾缺少全部受影响电机重新使能及 ECM 恢复证据"
+        marker = "❌"
+    return f"""
+**{marker} 结论：EtherCAT 异常由电机批量通信状态异常后触发 `Too many loss`，属于通信掉线，不是遥控器手动掉电；{conclusion}。**
+
+## 最终结论
+- **触发时间**：{_fmt_dt(trigger_time)}
+- **受影响电机**：{status_text}
+- **链路证据**：{counter_text}
+- **后续状态**：{recovery_text}
+
+## 排查建议
+- 检查 EtherCAT 分支器、上联线束和接插件，重点排查非零 lost link 计数对应端口。
+- 若再次出现，保留异常前后 30 秒 ethercat 日志，并检查供电波动和分支链路接触状态。
+""".strip()
+
+
 def render_manual_power_log_analysis(file_path, snowball_lines, ethercat_lines):
     start, end, first_event_time, recovery_time = ecm_event_window(snowball_lines)
     duration = recovery_duration_seconds(first_event_time, recovery_time)
@@ -4222,24 +4507,20 @@ def render_manual_power_log_analysis(file_path, snowball_lines, ethercat_lines):
 """.strip()
 
 
-def try_render_local_log_analysis(path):
+def try_render_local_log_analysis(path, extracted=None):
     """已知低风险模式直接本地模板回复，避免为重复问题消耗 Copilot token。"""
     file_path = Path(path)
-    node = (LOG_ANALYSIS_NODE or "snowball").lower()
-    snowball_lines, _matched_total, _line_truncated = _extract_node_lines(
-        file_path, node
-    )
+    extracted = extracted or extract_log_evidence(file_path)
+    snowball_lines, _matched_total, _line_truncated = extracted["snowball"]
     if not snowball_lines:
         return None
     ecm_anomaly, _evidence = detect_ecm_anomaly(snowball_lines)
     if not ecm_anomaly:
         return None
-    ethercat_lines, _ec_total, _ec_truncated = _extract_node_lines(
-        file_path, (LOG_ANALYSIS_ETHERCAT_NODE or "ethercat").lower()
-    )
+    ethercat_lines, _ec_total, _ec_truncated = extracted["ethercat"]
     if not ethercat_lines:
         return None
-    diagnostic_lines = _extract_ethercat_diagnostic_lines(file_path)
+    diagnostic_lines = extracted["diagnostic"]
     mixed_fault_answer = render_recovered_comm_with_motor_fault(
         snowball_lines, diagnostic_lines
     )
@@ -4250,6 +4531,11 @@ def try_render_local_log_analysis(path):
     )
     if persistent_drop_answer:
         return persistent_drop_answer
+    motor_trigger_answer = render_motor_triggered_comm_drop(
+        snowball_lines, ethercat_lines
+    )
+    if motor_trigger_answer:
+        return motor_trigger_answer
     return render_manual_power_log_analysis(file_path, snowball_lines, ethercat_lines)
 
 
@@ -4281,10 +4567,15 @@ def render_normal_log_analysis(source):
     return "**✅ 结论：这是一个正常日志，无 EtherCAT 通信异常或电机故障。**"
 
 
-def build_ecm_deep_analysis_block(file_path, evidence, snowball_lines):
+def build_ecm_deep_analysis_block(
+    file_path,
+    evidence,
+    snowball_lines,
+    extracted=None,
+):
     """构造 EtherCAT 主站异常深度分析区块，只附加日志证据。"""
-    ec_node = (LOG_ANALYSIS_ETHERCAT_NODE or "ethercat").lower()
-    ec_lines, ec_total, ec_truncated = _extract_node_lines(file_path, ec_node)
+    extracted = extracted or extract_log_evidence(file_path)
+    ec_lines, ec_total, ec_truncated = extracted["ethercat"]
     window_start, window_end, _first_event_time, _recovery_time = ecm_event_window(
         snowball_lines
     )
@@ -4313,7 +4604,7 @@ def build_ecm_deep_analysis_block(file_path, evidence, snowball_lines):
             f"-- ethercat 节点日志 --\n（日志中未找到 {LOG_ANALYSIS_ETHERCAT_NODE} "
             "节点的打印内容，请结合 snowball 侧信号与下方依据判断。）"
         )
-    diagnostic_lines = _extract_ethercat_diagnostic_lines(file_path)
+    diagnostic_lines = extracted["diagnostic"]
     if diagnostic_lines:
         diagnostic_body, _diagnostic_all, diagnostic_kept = _reduce_snowball_lines(
             diagnostic_lines, LOG_ANALYSIS_ETHERCAT_MAX_CHARS
@@ -4335,7 +4626,7 @@ def build_ecm_deep_analysis_block(file_path, evidence, snowball_lines):
     )
 
 
-def prepare_log_analysis_source(path):
+def prepare_log_analysis_source(path, extracted=None):
     """读取上传的日志文件，只保留 snowball 节点打印内容，压缩后返回可分析正文。
 
     大文件保护：无论文件多大都走流式逐行读取，只把命中 node 的行留在内存，并对命中行数封顶
@@ -4351,10 +4642,8 @@ def prepare_log_analysis_source(path):
     except OSError as exc:
         raise RuntimeError(f"无法读取上传的日志文件：{exc}")
 
-    node = (LOG_ANALYSIS_NODE or "snowball").lower()
-    snowball_lines, matched_total, line_truncated = _extract_node_lines(
-        file_path, node
-    )
+    extracted = extracted or extract_log_evidence(file_path)
+    snowball_lines, matched_total, line_truncated = extracted["snowball"]
     if not snowball_lines:
         raise RuntimeError(
             f"日志中未找到 {LOG_ANALYSIS_NODE} 节点的打印内容，无法分析。"
@@ -4382,7 +4671,12 @@ def prepare_log_analysis_source(path):
     )
     source = f"{header}\n\n{body}"
     if ecm_anomaly:
-        source += build_ecm_deep_analysis_block(file_path, ecm_evidence, snowball_lines)
+        source += build_ecm_deep_analysis_block(
+            file_path,
+            ecm_evidence,
+            snowball_lines,
+            extracted=extracted,
+        )
     return source
 
 
@@ -4743,9 +5037,16 @@ Skill、诊断参考和上一版回答，不要重新索取或复述输入。请
 """.strip()
 
 
-def run_copilot(job, job_dir):
+def run_copilot(job, job_dir, heartbeat=None):
     prompt_source = job["source"]
     doc_qa_content = None
+
+    def pulse():
+        if heartbeat is not None:
+            heartbeat()
+        else:
+            touch_job_heartbeat(job["job_id"])
+
     if job["action"] == "cases":
         set_job_progress(job["job_id"], "读取文档", "正在预取完整需求正文。")
         safe_update_job_card(job["job_id"])
@@ -4769,9 +5070,29 @@ def run_copilot(job, job_dir):
     elif job["action"] == "log_analysis":
         set_job_progress(job["job_id"], "读取日志", "正在读取并提取 snowball 节点日志。")
         safe_update_job_card(job["job_id"])
-        prompt_source = prepare_log_analysis_source(prompt_source)
+        extracted = extract_log_evidence(prompt_source, heartbeat=pulse)
+        local_answer = try_render_local_log_analysis(
+            prompt_source,
+            extracted=extracted,
+        )
+        if local_answer:
+            local_evidence = "\n".join(
+                extracted["snowball"][0] + extracted["ethercat"][0]
+            )
+            try:
+                validate_log_analysis_answer(local_evidence, local_answer)
+                return local_answer
+            except RuntimeError:
+                logging.exception(
+                    "deterministic log answer failed evidence gate; falling back to Copilot"
+                )
+        prompt_source = prepare_log_analysis_source(
+            prompt_source,
+            extracted=extracted,
+        )
         normal_answer = render_normal_log_analysis(prompt_source)
         if normal_answer:
+            validate_log_analysis_answer(prompt_source, normal_answer)
             return normal_answer
     prompt = build_prompt(job, job_dir, prompt_source)
     start_ai_usage(job)
@@ -4846,7 +5167,7 @@ def run_copilot(job, job_dir):
                     )
                     break
                 except subprocess.TimeoutExpired:
-                    touch_job_heartbeat(job["job_id"])
+                    pulse()
                     if time.monotonic() >= next_progress:
                         stage, progress = progress_message(job, job_dir)
                         set_job_progress(job["job_id"], stage, progress)
@@ -5042,6 +5363,14 @@ def worker_loop(worker_name, job_queue):
             if not job or job["status"] != "queued":
                 continue
             now = int(time.time())
+            initial_stage = {
+                "chat": "思考",
+                "doc_qa": "读取文档",
+                "log_analysis": "读取日志",
+                "weekly": "整理",
+                "report_refine": "读取文档",
+                "case_refine": "读取用例",
+            }.get(job["action"], "读取文档")
             starting_progress = (
                 "正在理解问题并整理测试建议。"
                 if job["action"] == "chat"
@@ -5074,14 +5403,25 @@ def worker_loop(worker_name, job_queue):
             )
             set_job_progress(
                 job_id,
-                "思考" if job["action"] == "chat" else "读取文档",
+                initial_stage,
                 starting_progress,
             )
             safe_update_job_card(job_id)
             job = get_job(job_id=job_id)
             job_dir = JOBS_DIR / job_id
             job_dir.mkdir(parents=True, exist_ok=True)
-            result = run_copilot(job, job_dir)
+
+            def refresh_worker_heartbeat():
+                now = int(time.time())
+                touch_job_heartbeat(job_id)
+                with WORKER_HEARTBEAT_LOCK:
+                    WORKER_HEARTBEATS[worker_name] = now
+
+            result = run_copilot(
+                job,
+                job_dir,
+                heartbeat=refresh_worker_heartbeat,
+            )
             if job["action"] in {"cases", "case_refine"}:
                 result = finalize_case_artifacts(job, job_dir, result)
             validate_job_artifacts(job, result)

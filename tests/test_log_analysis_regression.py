@@ -1,9 +1,11 @@
 import json
+import os
 import subprocess
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from openpyxl import load_workbook
 
@@ -149,6 +151,60 @@ class PreprocessingRegressionTests(unittest.TestCase):
         self.assertNotIn("# EtherCAT 主站异常诊断知识库", source)
         self.assertNotIn("EtherCAT 主站异常判断依据（知识库", source)
 
+    def test_single_pass_extraction_matches_legacy_extractors(self):
+        log = "\n".join(
+            [
+                "2026-08-08 11:00:00.000 I/other(mroslaunch)(1/1): node_name: ethercat(mroslaunch)",
+                "2026-08-08 11:00:00.100 I/snowball(mroslaunch)(1/1): state:ST_IDLE",
+                "2026-08-08 11:00:00.200 W/ethercat(mroslaunch)(1/1): motor2 something happened, statusword 0x0 code 0xf",
+                "2026-08-08 11:00:00.300 I/ethercat(mroslaunch)(1/1): [90] 'EtherCAT lost link cnt of port1': 1",
+                "2026-08-08 11:00:00.400 I/snowball(mroslaunch)(1/1): ethercat ok!",
+            ]
+        )
+        heartbeat = Mock()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "sample.log"
+            path.write_text(log, encoding="utf-8")
+            extracted = bot.extract_log_evidence(path, heartbeat=heartbeat)
+            legacy_snowball = bot._extract_node_lines(path, "snowball")
+            legacy_ethercat = bot._extract_node_lines(path, "ethercat")
+            legacy_diagnostic = bot._extract_ethercat_diagnostic_lines(path)
+
+        self.assertEqual(legacy_snowball, extracted["snowball"])
+        self.assertEqual(legacy_ethercat, extracted["ethercat"])
+        self.assertEqual(legacy_diagnostic, extracted["diagnostic"])
+        self.assertGreaterEqual(heartbeat.call_count, 2)
+
+    def test_motor_triggered_comm_drop_returns_deterministic_answer(self):
+        snowball = [
+            "2026-08-08 11:12:00.203 E/snowball(mroslaunch)(1/1): >>>>>|ecm err|",
+            "2026-08-08 11:12:28.825 I/snowball(mroslaunch)(1/1): ethercat ok! ecm ok",
+        ]
+        ethercat = [
+            *[
+                f"2026-08-08 11:12:00.200 W/ethercat(mroslaunch)(1/1): "
+                f"motor{motor} something happened, statusword 0x0 code 0xf"
+                for motor in range(1, 11)
+            ],
+            "2026-08-08 11:12:00.202 E/ethercat(mroslaunch)(1/1): "
+            "Motor = 65535, 0xf10b, Too many loss.",
+            "2026-08-08 11:12:11.429 I/ethercat(mroslaunch)(1/1): "
+            "[90] 'EtherCAT lost link cnt of port1': 1",
+            *[
+                f"2026-08-08 11:12:28.800 I/ethercat(mroslaunch)(1/1): "
+                f"Motor {motor} (slave {motor + 1}) enabled successfully."
+                for motor in range(1, 11)
+            ],
+        ]
+
+        answer = bot.render_motor_triggered_comm_drop(snowball, ethercat)
+
+        self.assertIn("属于通信掉线", answer)
+        self.assertIn("不是遥控器手动掉电", answer)
+        self.assertIn("电机1-10", answer)
+        self.assertIn("[90]=1", answer)
+        bot.validate_log_analysis_answer("\n".join(ethercat), answer)
+
 
 class CorrectionLoopRegressionTests(unittest.TestCase):
     class FakeProcess:
@@ -175,6 +231,16 @@ class CorrectionLoopRegressionTests(unittest.TestCase):
             patch.object(bot, "start_ai_usage"),
             patch.object(bot, "finish_ai_usage"),
             patch.object(bot, "is_cancel_requested", return_value=False),
+            patch.object(
+                bot,
+                "extract_log_evidence",
+                return_value={
+                    "snowball": (["snowball"], 1, False),
+                    "ethercat": (["ethercat"], 1, False),
+                    "diagnostic": [],
+                },
+            ),
+            patch.object(bot, "try_render_local_log_analysis", return_value=None),
             patch.object(bot, "prepare_log_analysis_source", return_value="evidence"),
             patch.object(bot, "build_prompt", return_value="FULL ORIGINAL PROMPT"),
             patch.object(bot, "set_job_progress"),
@@ -184,7 +250,8 @@ class CorrectionLoopRegressionTests(unittest.TestCase):
             patch.object(bot, "LOG_ANALYSIS_MAX_REVISIONS", 2),
         )
         with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], \
-                patches[6], patches[7], patches[8], patches[9]:
+                patches[6], patches[7], patches[8], patches[9], patches[10], \
+                patches[11]:
             result = bot.run_copilot(
                 {"job_id": "job-test", "action": "log_analysis", "source": "x"},
                 bot.ROOT,
@@ -238,6 +305,60 @@ class CompletionInteractionTests(unittest.TestCase):
             bot.safe_reply_completion_fun_image(job)
 
         reply_image.assert_not_called()
+
+
+class OperationsRegressionTests(unittest.TestCase):
+    def test_progress_mapping_covers_live_stages(self):
+        self.assertEqual(15, bot.job_stage_progress("读取日志", "running"))
+        self.assertEqual(55, bot.job_stage_progress("分析日志", "running"))
+        self.assertEqual(75, bot.job_stage_progress("校正结论", "running"))
+        self.assertEqual(96, bot.job_stage_progress("更新边框", "running"))
+        self.assertEqual(98, bot.job_stage_progress("更新交互", "running"))
+        self.assertEqual(100, bot.job_stage_progress("分析日志", "done"))
+
+    def test_python_stage_is_healthy_when_worker_heartbeat_is_alive(self):
+        healthy, startup_grace = bot.running_job_health(
+            heartbeat_age=20,
+            process_running=False,
+            worker_running=True,
+            startup_age=120,
+        )
+
+        self.assertTrue(healthy)
+        self.assertFalse(startup_grace)
+
+    def test_two_calendar_day_retention_starts_at_yesterday_midnight(self):
+        now = datetime(2026, 8, 13, 11, 30).timestamp()
+        with patch.object(bot, "DATA_RETENTION_DAYS", 2):
+            cutoff = datetime.fromtimestamp(bot.retention_cutoff_timestamp(now))
+
+        self.assertEqual(datetime(2026, 8, 12, 0, 0), cutoff)
+
+    def test_orphan_cache_cleanup_keeps_recent_and_registered_dirs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            jobs_dir = Path(tmpdir)
+            old_orphan = jobs_dir / "job_old"
+            old_registered = jobs_dir / "job_registered"
+            recent_orphan = jobs_dir / "_staging_recent"
+            for path in (old_orphan, old_registered, recent_orphan):
+                path.mkdir()
+            cutoff = datetime(2026, 8, 12, 0, 0).timestamp()
+            old_time = datetime(2026, 8, 11, 12, 0).timestamp()
+            recent_time = datetime(2026, 8, 12, 12, 0).timestamp()
+            os.utime(old_orphan, (old_time, old_time))
+            os.utime(old_registered, (old_time, old_time))
+            os.utime(recent_orphan, (recent_time, recent_time))
+
+            with patch.object(bot, "JOBS_DIR", jobs_dir):
+                removed = bot.cleanup_orphan_job_dirs(
+                    cutoff,
+                    {"job_registered"},
+                )
+
+            self.assertEqual(1, removed)
+            self.assertFalse(old_orphan.exists())
+            self.assertTrue(old_registered.exists())
+            self.assertTrue(recent_orphan.exists())
 
 
 class DeterministicCasePipelineTests(unittest.TestCase):
