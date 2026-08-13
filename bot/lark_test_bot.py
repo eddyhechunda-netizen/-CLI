@@ -171,14 +171,6 @@ ECM_RECOVERED_RE = re.compile(
     r"ecm\s+(?:is\s+)?ok|EV_EXP_RELEASE_ECM|ethercat\s+ok", re.IGNORECASE
 )
 ECM_EXIT_RE = re.compile(r"ethercat\s+exit|EV_EXP_ECM", re.IGNORECASE)
-ETHERCAT_MANUAL_POWER_RE = re.compile(
-    r"EcMainCreateApp failed|End programm|code:\s*131076.*ethercat exit",
-    re.IGNORECASE,
-)
-ETHERCAT_RECOVERY_RE = re.compile(
-    r"Found\s+\d+\s+slaves|All slaves reach|EtherCAT Master Start|PRE-OP|SAFE-OP|OP",
-    re.IGNORECASE,
-)
 ETHERCAT_HARDWARE_LINK_RE = re.compile(
     r"link_status\s*=\s*(?:0x5617|0x5a37)|lost link cnt of port1\s*>\s*0|"
     r"lost\s+link|state\s*word\s*(?:is|=)\s*0x0|status\s*word\s*(?:is|=)\s*0x0|"
@@ -186,27 +178,11 @@ ETHERCAT_HARDWARE_LINK_RE = re.compile(
     r"ret\s*=\s*-3|0xf10b",
     re.IGNORECASE,
 )
-ETHERCAT_PERSISTENT_COMM_DROP_PATTERNS = {
-    "master_slave1_lost": re.compile(r"\[\s*90\s*\]\s*[=:]\s*1", re.IGNORECASE),
-    "slave1_offline": re.compile(r"ret\s*=\s*-3", re.IGNORECASE),
-    "slave2_error_frames": re.compile(r"\[\s*8a\s*\]\s*[=:]\s*255", re.IGNORECASE),
-    "slave7_slave8_lost": re.compile(r"\[\s*92\s*\]\s*[=:]\s*1", re.IGNORECASE),
-    "master_exit": re.compile(r"0xf10b|ethercat\s+exit", re.IGNORECASE),
-    "slaves_unrecovered": re.compile(
-        r"Slave\s*(?:2|3|4|5|6|7|8|9|10|11|12).*(?:offline|lost|fail|ret\s*=\s*-3|disconnect|not\s+found)",
-        re.IGNORECASE,
-    ),
-}
-ETHERCAT_MOTOR_ENABLE_RE = re.compile(
-    r"Motor\s+(\d+)\s+\(slave\s+(\d+)\)\s+enabled successfully",
-    re.IGNORECASE,
-)
 ETHERCAT_MOTOR_ENABLE_FAILURE_RE = re.compile(
     r"Failed to enable motor\s+(\d+)\s+\(slave\s+(\d+)\)"
     r"\s+statusword\s+(0x[0-9a-f]+)\s+code\s+(0x[0-9a-f]+)",
     re.IGNORECASE,
 )
-ETHERCAT_FOUND_SLAVES_RE = re.compile(r"Found\s+12\s+slaves", re.IGNORECASE)
 ETHERCAT_MOTOR_WARNING_RE = re.compile(
     r"motor(\d+)\s+something happened,\s+statusword\s+(0x[0-9a-f]+)"
     r"\s+code\s+(0x[0-9a-f]+)",
@@ -214,9 +190,6 @@ ETHERCAT_MOTOR_WARNING_RE = re.compile(
 )
 LOG_TIMESTAMP_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?)")
 CLK_RE = re.compile(r"clk\(([0-9.]+)\)")
-ECM_MANUAL_POWER_MAX_RECOVERY_SECONDS = int(
-    os.environ.get("LARK_TEST_BOT_ECM_MANUAL_POWER_MAX_RECOVERY_SECONDS", "120")
-)
 
 STOP_EVENT = threading.Event()
 JOB_QUEUE = queue.Queue()
@@ -3527,7 +3500,8 @@ ethercat 节点异常窗口和全文件诊断证据，请据此还原全过程�
 - 第五节不要冗长；必须包含「问题类型/受影响电机/受影响范围/触发原因/后续状态/排查建议」这些关键字段即可。
 - 涉及具体掉线电机时，先按 SN 前缀确定机器形态（DACH=双臂用 2.1 表 / SF=双足用 2.2 表 / WF=轮足用 2.3 表），再用区块内对应「网络拓扑与从站号对照表」把 motor 号换算成 slave 号，并按串行拓扑指出应重点排查的 M-1↔M 链路（若 M-1 是 CU1128 分支器——双臂 slave1/slave10、双足与轮足 slave1/slave7——则优先怀疑分支器及其上联链路）。
 - 第五节开头必须给出**时间线**：异常发生时间、主站退出时间（若有 `0xf10b`/`ethercat exit`）、持续时间、恢复时间（未恢复则写“截至日志末尾未恢复”），时间取日志中真实时间戳。
-- 输出前必须执行证据回查：逐一列出日志中所有异常电机及其 statusword/code，确认每个异常电机都已进入最终结论；逐一核对所有非零计数器，禁止把“lost link 全为 0”扩大写成“所有 EtherCAT 错误计数器均为 0”；恢复结论必须有异常发生后的恢复日志支持。
+- lost link / 帧错误计数按从站分块打印：每块以形如 `... Slave1`、`... Slave6` 的表头开始，其后的 `[8f]=port0 / [90]=port1 / [91]=port2 / [92]=port3` 计数都归属于该表头所指从站。判定非零计数时必须先回看它所属的 `SlaveN` 表头，再按参考文件的定位方法（`[90]=1 on SlaveN` 表示该从站 port1 上联链路曾丢链）结合 SN 拓扑表把从站换算成电机/链路位置，禁止脱离所属从站泛泛地写 `[90]=1`。
+- 输出前必须执行证据回查：逐一列出日志中所有异常电机及其 statusword/code，确认每个异常电机都已进入最终结论；逐一核对所有非零计数器及其所属从站，禁止把“lost link 全为 0”扩大写成“所有 EtherCAT 错误计数器均为 0”；恢复结论必须有异常发生后的恢复日志支持。
 
 日志正文（仅 snowball 节点，已去重压缩）：
 {source}
@@ -3889,6 +3863,11 @@ ETHERCAT_DIAGNOSTIC_PATTERNS = (
     "ec master exited",
 )
 
+# 每个从站错误计数块的表头形如 "... EcApplication.cpp(1090) clk(...) Slave1"，
+# 保留它才能把随后的 [8f]/[90]/[91]/[92] lost link 计数归属到具体从站，
+# 这是 ethercat_master_diagnosis.md Step 2「确认掉线电机对应从站号」的必要证据。
+ETHERCAT_SLAVE_BLOCK_RE = re.compile(r"\bSlave\d+\s*$", re.IGNORECASE)
+
 
 def _finalize_node_capture(head, tail, matched_total, cap):
     truncated = matched_total > cap
@@ -3954,9 +3933,12 @@ def extract_log_evidence(file_path, heartbeat=None):
                         capture["head"].append(stripped)
                     else:
                         capture["tail"].append(stripped)
-                    if name == "ethercat" and any(
-                        pattern in lowered
-                        for pattern in ETHERCAT_DIAGNOSTIC_PATTERNS
+                    if name == "ethercat" and (
+                        any(
+                            pattern in lowered
+                            for pattern in ETHERCAT_DIAGNOSTIC_PATTERNS
+                        )
+                        or ETHERCAT_SLAVE_BLOCK_RE.search(stripped)
                     ):
                         diagnostic_lines.append(stripped)
                     break
@@ -3989,7 +3971,7 @@ def _extract_ethercat_diagnostic_lines(file_path):
                 if any(
                     pattern in lowered
                     for pattern in ETHERCAT_DIAGNOSTIC_PATTERNS
-                ):
+                ) or ETHERCAT_SLAVE_BLOCK_RE.search(line.rstrip("\n")):
                     lines.append(line.rstrip("\n"))
     except OSError as exc:
         raise RuntimeError(f"无法读取上传的日志文件：{exc}")
@@ -4065,13 +4047,6 @@ def fmt_log_time(line):
     return " / ".join(parts) if parts else "日志未体现"
 
 
-def first_matching_line(lines, regex):
-    for line in lines:
-        if regex.search(line):
-            return line
-    return ""
-
-
 def ecm_event_window(snowball_lines):
     """根据 snowball ECM 异常/恢复信号计算异常窗口。"""
     event_times = []
@@ -4107,525 +4082,6 @@ def filter_lines_by_window(lines, start, end):
         if ts and start <= ts <= end:
             windowed.append(line)
     return windowed
-
-
-def recovery_duration_seconds(first_event_time, recovery_time):
-    if not first_event_time or not recovery_time:
-        return None
-    return max(0.0, (recovery_time - first_event_time).total_seconds())
-
-
-def _fmt_dt(dt):
-    return dt.strftime("%H:%M:%S.%f")[:-3] if dt else "日志未体现"
-
-
-def build_ecm_timing_summary(snowball_lines, ethercat_lines):
-    """计算 ECM 异常发生/持续/恢复时间，返回可直接嵌入回复的「时间线」文本块。"""
-    _start, _end, first_event_time, recovery_time = ecm_event_window(snowball_lines)
-    all_lines = list(snowball_lines) + list(ethercat_lines)
-    last_ts = None
-    for line in all_lines:
-        ts = parse_log_time(line)
-        if ts and (last_ts is None or ts > last_ts):
-            last_ts = ts
-    exit_line = first_matching_line(
-        all_lines, re.compile(r"0xf10b|ethercat\s+exit", re.IGNORECASE)
-    )
-    exit_ts = parse_log_time(exit_line)
-    onset = first_event_time
-    if recovery_time:
-        dur = recovery_duration_seconds(onset, recovery_time)
-        duration_text = f"约 {dur:.1f} 秒" if dur is not None else "日志未体现"
-        recovery_text = f"{_fmt_dt(recovery_time)}（主站恢复信号）"
-    elif onset and last_ts:
-        dur = max(0.0, (last_ts - onset).total_seconds())
-        duration_text = f"约 {dur:.1f} 秒且持续未恢复（截至日志末尾 {_fmt_dt(last_ts)}）"
-        recovery_text = "截至日志末尾主站/从站未恢复"
-    else:
-        duration_text = "持续未恢复"
-        recovery_text = "截至日志末尾主站/从站未恢复"
-    return (
-        "## 时间线\n"
-        f"- **异常发生时间**：{_fmt_dt(onset)}\n"
-        f"- **主站退出时间**：{_fmt_dt(exit_ts)}（`0xf10b` / `ethercat exit`）\n"
-        f"- **持续时间**：{duration_text}\n"
-        f"- **恢复时间**：{recovery_text}"
-    )
-
-
-def detect_persistent_comm_drop(lines):
-    text = "\n".join(lines)
-    hits = {
-        name: bool(pattern.search(text))
-        for name, pattern in ETHERCAT_PERSISTENT_COMM_DROP_PATTERNS.items()
-    }
-    # 明确的通信掉线需要链路丢失/离线/错误帧证据，并伴随主站退出或持续无法恢复。
-    core_hits = sum(
-        1
-        for key in (
-            "master_slave1_lost",
-            "slave1_offline",
-            "slave2_error_frames",
-            "slave7_slave8_lost",
-        )
-        if hits.get(key)
-    )
-    return core_hits >= 2 and (hits.get("master_exit") or hits.get("slaves_unrecovered")), hits
-
-
-def render_recovered_comm_with_motor_fault(snowball_lines, ethercat_lines):
-    """Render the verified WF pattern: transient branch drops plus persistent motor fault."""
-    link_index = next(
-        (
-            index
-            for index, line in enumerate(ethercat_lines)
-            if re.search(r"\[\s*90\s*\].*:\s*1\s*$", line, re.IGNORECASE)
-        ),
-        None,
-    )
-    if link_index is None:
-        return None
-    link_window = ethercat_lines[
-        max(0, link_index - 800):link_index + 1200
-    ]
-    if not any(
-        re.search(r"\[\s*8f\s*\].*:\s*1\s*$", line, re.IGNORECASE)
-        for line in link_window
-    ):
-        return None
-
-    after_link = ethercat_lines[link_index + 1:]
-    if not any(ETHERCAT_FOUND_SLAVES_RE.search(line) for line in after_link):
-        return None
-
-    enabled = set()
-    failures = []
-    for line in after_link:
-        enabled_match = ETHERCAT_MOTOR_ENABLE_RE.search(line)
-        if enabled_match:
-            enabled.add(int(enabled_match.group(1)))
-        failure_match = ETHERCAT_MOTOR_ENABLE_FAILURE_RE.search(line)
-        if failure_match:
-            failures.append(
-                (
-                    int(failure_match.group(1)),
-                    int(failure_match.group(2)),
-                    failure_match.group(3).lower(),
-                    failure_match.group(4).lower(),
-                    line,
-                )
-            )
-    motor10_failures = [
-        item
-        for item in failures
-        if item[:4] == (10, 12, "0x1208", "0xff01")
-    ]
-    if not set(range(1, 10)).issubset(enabled) or len(motor10_failures) < 2:
-        return None
-
-    first_link_line = ethercat_lines[link_index]
-    first_fault_line = motor10_failures[0][4]
-    last_fault_line = motor10_failures[-1][4]
-    return f"""
-**❌ 最终结论：EtherCAT 两条分支发生暂时性通信掉线并已恢复，但电机10（Slave 12）持续报母线过流故障 `0xff01`，多次重启后仍使能失败。**
-
-## 最终结论
-- **问题类型**：通信掉线（暂时性）+ 电机故障（持续性）
-- **受影响电机**：
-  - 电机1-5：通信掉线，主站重启后已恢复
-  - 电机6-9：通信掉线，主站重启后已恢复
-  - **电机10（Slave 12）：持续故障，未恢复**
-
-## 触发原因
-- **通信掉线**：两条分支均出现链路丢失计数，关键证据为 Slave 1 `[90]=1` 和右腿分支 `[8f]=1`；首次证据时间为 **{fmt_log_time(first_link_line)}**。
-- **电机故障**：电机10重复使能失败，持续上报 `statusword 0x1208 / code 0xff01`；首次故障为 **{fmt_log_time(first_fault_line)}**，末次仍为 **{fmt_log_time(last_fault_line)}**。
-- `0xff01` 对应**母线过流停机故障**，属于驱动器保护，不是通信链路未恢复。
-
-## 后续状态
-- EtherCAT 主站重启后重新发现 **12 个从站**，说明所有从站物理连接已恢复。
-- 电机1-9均重新使能成功，状态恢复为 `statusword 0x1237 / code 0x0`。
-- 电机10在多次主站重启后仍为 `0x1208 / 0xff01`，导致上电序列失败和主站反复退出。
-
-## 🔧 排查建议
-- **通信掉线（已恢复）**：检查线束和接插件；重点检查电机1（Slave 2）上游的 Slave 1 分支链路，以及电机6（Slave 8）上游的 Slave 7/CU1128 分支链路。
-- **电机故障（持续）**：检查电机10（Slave 12）驱动器、母线电流和负载状态；`0xff01` 为母线过流，需排除短路、堵转、机械冲击和驱动器硬件异常，处理后重启清除故障。
-""".strip()
-
-
-def render_persistent_comm_drop_log_analysis(snowball_lines, ethercat_lines):
-    lines = snowball_lines + ethercat_lines
-    matched, hits = detect_persistent_comm_drop(lines)
-    if not matched:
-        return None
-
-    timing = build_ecm_timing_summary(snowball_lines, ethercat_lines)
-    return f"""
-**❌ 最终结论：EtherCAT 主站异常原因为通信掉线（持续性），不是遥控器手动掉电。**
-
-{timing}
-
-## 最终结论
-- **问题类型**：通信掉线（持续性）
-- **受影响电机**：电机1-10
-- **受影响范围**：Slave 2-12（分支器 Slave 1 失效、Slave 7 port3 链路断线）
-- **后续状态**：EtherCAT 主站退出（0xf10b）；重启后 Slave 2-12 持续无法恢复连接
-
-## 触发原因
-1. Master→Slave 1 链路丢失（`[90]=1`），Slave 1 离线（`ret=-3`）。
-2. Slave 1→Slave 2 链路丢失（`[90]=1`），Slave 2 上游错误帧（`[8a]=255`）。
-3. Slave 7→Slave 8 链路丢失（`[92]=1`），Slave 8-12 掉线。
-
-## 排查建议
-检查线束/接插件、电机2（Slave 2）驱动器、电机6（Slave 8）驱动器、Slave 1→2 链路、Slave 7→8 链路。
-""".strip()
-
-
-def _format_motor_groups(incidents):
-    groups = {}
-    for motor, statusword, code in incidents:
-        groups.setdefault((statusword, code), []).append(motor)
-    parts = []
-    for (statusword, code), motors in sorted(groups.items()):
-        motors = sorted(set(motors))
-        consecutive = motors == list(range(motors[0], motors[-1] + 1))
-        motor_text = (
-            f"电机{motors[0]}-{motors[-1]}"
-            if consecutive and len(motors) > 1
-            else "、".join(f"电机{motor}" for motor in motors)
-        )
-        parts.append(f"{motor_text}：`statusword {statusword} / code {code}`")
-    return "；".join(parts)
-
-
-LOST_LINK_PORT_MAP = {
-    "8f": (0, "port0"),
-    "90": (1, "port1"),
-    "91": (2, "port2"),
-    "92": (3, "port3"),
-}
-
-# EtherCAT 网络拓扑（轮足/双足形态）：分支器 A=Slave 1、分支器 B(CU1128)=Slave 7；
-# 分支 A 下游 电机1-5=Slave 2-6，分支 B 下游 电机6-10=Slave 8-12。
-BRANCH_A_MOTOR_TO_SLAVE = {motor: motor + 1 for motor in range(1, 6)}
-BRANCH_B_MOTOR_TO_SLAVE = {motor: motor + 2 for motor in range(6, 11)}
-
-
-def attribute_lost_link_counters(ethercat_lines):
-    """把非零 lost link 计数归属到对应从站，返回 [(slave, port_idx, port_name, value)]。"""
-    results = []
-    current_slave = None
-    for line in ethercat_lines:
-        slave_match = re.search(r"\bSlave(\d+)\b", line)
-        if slave_match:
-            current_slave = int(slave_match.group(1))
-        counter_match = re.search(
-            r"\[\s*(8f|90|91|92)\s*\].*lost link cnt of (port\d).*:\s*([1-9]\d*)\s*$",
-            line,
-            re.IGNORECASE,
-        )
-        if counter_match and current_slave is not None:
-            register = counter_match.group(1).lower()
-            port_idx, port_name = LOST_LINK_PORT_MAP[register]
-            entry = (current_slave, port_idx, port_name, int(counter_match.group(3)))
-            if entry not in results:
-                results.append(entry)
-    return results
-
-
-def render_motor_triggered_comm_drop(snowball_lines, ethercat_lines):
-    """电机批量告警后紧接 Too many loss 时给出稳定的确定性通信掉线结论。"""
-    warning_events = []
-    loss_events = []
-    for line in ethercat_lines:
-        timestamp = parse_log_time(line)
-        if not timestamp:
-            continue
-        warning = ETHERCAT_MOTOR_WARNING_RE.search(line)
-        if warning:
-            warning_events.append(
-                (
-                    timestamp,
-                    int(warning.group(1)),
-                    warning.group(2).lower(),
-                    warning.group(3).lower(),
-                )
-            )
-        if "too many loss" in line.lower():
-            loss_events.append(timestamp)
-    trigger_time = next(
-        (
-            loss_time
-            for loss_time in loss_events
-            if any(
-                0 <= (loss_time - warning_time).total_seconds() <= 2
-                for warning_time, _motor, _statusword, _code in warning_events
-            )
-        ),
-        None,
-    )
-    if trigger_time is None:
-        return None
-    incidents = {
-        (motor, statusword, code)
-        for warning_time, motor, statusword, code in warning_events
-        if 0 <= (trigger_time - warning_time).total_seconds() <= 2
-    }
-    if not incidents:
-        return None
-
-    nonzero_counters = []
-    for line in ethercat_lines:
-        match = re.search(
-            r"\[\s*(8f|90|91|92)\s*\].*:\s*([1-9]\d*)\s*$",
-            line,
-            re.IGNORECASE,
-        )
-        if match:
-            counter = f"[{match.group(1).lower()}]={match.group(2)}"
-            if counter not in nonzero_counters:
-                nonzero_counters.append(counter)
-
-    attributed = attribute_lost_link_counters(ethercat_lines)
-    slave1_uplink_lost = any(
-        slave == 1 and port_idx == 1 for slave, port_idx, _name, _value in attributed
-    )
-
-    affected_motors = {motor for motor, _statusword, _code in incidents}
-    enabled_after = set()
-    for line in ethercat_lines:
-        timestamp = parse_log_time(line)
-        if not timestamp or timestamp <= trigger_time:
-            continue
-        enabled = ETHERCAT_MOTOR_ENABLE_RE.search(line)
-        if enabled:
-            enabled_after.add(int(enabled.group(1)))
-    recovery_times = [
-        parse_log_time(line)
-        for line in snowball_lines
-        if ECM_RECOVERED_RE.search(line)
-        and parse_log_time(line)
-        and parse_log_time(line) > trigger_time
-    ]
-    recovered = affected_motors.issubset(enabled_after) and bool(recovery_times)
-    recovery_time = min(recovery_times) if recovery_times else None
-    status_text = _format_motor_groups(incidents)
-    counter_text = "、".join(nonzero_counters) or "日志未提取到非零 lost link 计数"
-    if recovered:
-        conclusion = "通信掉线后主站重启并恢复，受影响电机均重新使能成功"
-        recovery_text = (
-            f"{_fmt_dt(recovery_time)} 出现 `ethercat ok/ecm ok`，"
-            f"电机{min(affected_motors)}-{max(affected_motors)} 均重新使能成功"
-        )
-        marker = "⚠️"
-    else:
-        conclusion = "通信掉线后截至日志末尾未完全恢复"
-        recovery_text = "截至日志末尾缺少全部受影响电机重新使能及 ECM 恢复证据"
-        marker = "❌"
-
-    # 命中 [90]=1 on Slave 1（主站↔分支器A端口1链路硬件掉线）时给出拓扑根因定位。
-    if slave1_uplink_lost:
-        return _render_slave1_uplink_comm_drop(
-            trigger_time=trigger_time,
-            affected_motors=affected_motors,
-            attributed=attributed,
-            counter_text=counter_text,
-            status_text=status_text,
-            recovered=recovered,
-            recovery_time=recovery_time,
-            marker=marker,
-            conclusion=conclusion,
-            recovery_text=recovery_text,
-        )
-
-    return f"""
-**{marker} 结论：EtherCAT 异常由电机批量通信状态异常后触发 `Too many loss`，属于通信掉线，不是遥控器手动掉电；{conclusion}。**
-
-## 最终结论
-- **触发时间**：{_fmt_dt(trigger_time)}
-- **受影响电机**：{status_text}
-- **链路证据**：{counter_text}
-- **后续状态**：{recovery_text}
-
-## 排查建议
-- 检查 EtherCAT 分支器、上联线束和接插件，重点排查非零 lost link 计数对应端口。
-- 若再次出现，保留异常前后 30 秒 ethercat 日志，并检查供电波动和分支链路接触状态。
-""".strip()
-
-
-def _render_slave1_uplink_comm_drop(
-    *,
-    trigger_time,
-    affected_motors,
-    attributed,
-    counter_text,
-    status_text,
-    recovered,
-    recovery_time,
-    marker,
-    conclusion,
-    recovery_text,
-):
-    """[90]=1 on Slave 1 场景：主站↔分支器A端口1链路硬件掉线导致级联全网掉线。"""
-    motors = sorted(affected_motors)
-    motor_enum = "、".join(f"电机{motor}" for motor in motors)
-    branch_a_motors = [motor for motor in motors if motor in BRANCH_A_MOTOR_TO_SLAVE]
-    branch_b_motors = [motor for motor in motors if motor in BRANCH_B_MOTOR_TO_SLAVE]
-
-    def _slave_span(mapping, motor_list):
-        slaves = sorted(mapping[m] for m in motor_list)
-        if not slaves:
-            return ""
-        return f"Slave {slaves[0]}-{slaves[-1]}"
-
-    branch_a_slaves = _slave_span(BRANCH_A_MOTOR_TO_SLAVE, branch_a_motors)
-    branch_b_slaves = _slave_span(BRANCH_B_MOTOR_TO_SLAVE, branch_b_motors)
-    branch_a_text = (
-        f"分支A下游（{branch_a_slaves} = "
-        f"{'、'.join(f'电机{m}' for m in branch_a_motors)}）全部掉线"
-        if branch_a_motors
-        else ""
-    )
-    branch_b_text = (
-        f"分支B因级联效应（{branch_b_slaves} = "
-        f"{'、'.join(f'电机{m}' for m in branch_b_motors)}）全部掉线"
-        if branch_b_motors
-        else ""
-    )
-    scope_parts = [part for part in (branch_a_text, branch_b_text) if part]
-    scope_text = "；".join(scope_parts)
-
-    attributed_text = "、".join(
-        f"Slave {slave} {name}={value}"
-        for slave, _idx, name, value in attributed
-    ) or "日志未提取到非零 lost link 计数"
-
-    trigger_reasons = [
-        "`[90]=1 on Slave 1`：Master 与分支器A(Slave 1)端口1之间链路发生过硬件掉线（根因）。",
-    ]
-    if branch_a_text:
-        trigger_reasons.append(f"{branch_a_text}。")
-    if branch_b_text:
-        trigger_reasons.append(f"{branch_b_text}。")
-    trigger_block = "\n".join(
-        f"{index}. {reason}" for index, reason in enumerate(trigger_reasons, start=1)
-    )
-
-    return f"""
-**{marker} 结论：EtherCAT 异常为暂时性通信掉线（并非遥控器手动掉电）：主站与分支器A(Slave 1)端口1链路发生过硬件掉线（`[90]=1 on Slave 1`），导致分支A下游及分支B级联全部掉线；{conclusion}。**
-
-## 最终结论
-- **问题类型**：通信掉线（暂时性）
-- **触发时间**：{_fmt_dt(trigger_time)}
-- **受影响电机**：{motor_enum}
-- **状态字证据**：{status_text}
-- **受影响范围**：全网（12 个从站）— `[90]=1 on Slave 1`，Master 与分支器A端口1之间链路丢失，{scope_text}
-- **链路证据**：{attributed_text}
-- **后续状态**：{recovery_text}
-
-## 触发原因
-{trigger_block}
-
-## 排查建议
-- 重点检查 Master 与分支器A(Slave 1)之间的上联线束、接插件和分支器A本身，`[90]` 对应 port1 上联端口。
-- 检查各非零 lost link 计数对应端口，排查供电波动和分支链路接触状态。
-- 若再次出现，保留异常前后 30 秒 ethercat 日志，确认是否为分支器A上联链路间歇性接触不良。
-""".strip()
-
-
-def render_manual_power_log_analysis(file_path, snowball_lines, ethercat_lines):
-    start, end, first_event_time, recovery_time = ecm_event_window(snowball_lines)
-    duration = recovery_duration_seconds(first_event_time, recovery_time)
-    if duration is None or duration > ECM_MANUAL_POWER_MAX_RECOVERY_SECONDS:
-        return None
-    windowed_ethercat = filter_lines_by_window(ethercat_lines, start, end)
-    combined = "\n".join(snowball_lines + windowed_ethercat)
-    if ETHERCAT_HARDWARE_LINK_RE.search(combined):
-        return None
-    if not (
-        first_matching_line(snowball_lines, ECM_ANOMALY_ERROR_RE)
-        and first_matching_line(snowball_lines, ECM_EXIT_RE)
-        and first_matching_line(snowball_lines, ECM_RECOVERED_RE)
-        and first_matching_line(windowed_ethercat, ETHERCAT_MANUAL_POWER_RE)
-    ):
-        return None
-
-    err_line = first_matching_line(snowball_lines, ECM_ANOMALY_ERROR_RE)
-    exit_line = first_matching_line(snowball_lines, ECM_EXIT_RE)
-    recovery_line = first_matching_line(snowball_lines, ECM_RECOVERED_RE)
-    failed_line = first_matching_line(windowed_ethercat, ETHERCAT_MANUAL_POWER_RE)
-    recovery_hint = first_matching_line(windowed_ethercat, ETHERCAT_RECOVERY_RE)
-    final_mode_line = first_matching_line(
-        snowball_lines,
-        re.compile(r"ST_DEVED|working_mode|robot_mode|ST_IDLE|ST_\w+", re.IGNORECASE),
-    )
-    duration_text = f"{duration:.1f} 秒"
-    file_name = Path(file_path).name
-    return f"""
-**⚠️ 结论：{file_name} 命中“遥控器控制主站手动掉电/上电”模式，ECM/EtherCAT 主站出现瞬时异常，约 {duration_text} 后自恢复；当前日志未见硬件断线证据。**
-
-## 一、总体结论
-- **根因判断**：该模式已由现场人工确认，优先判定为**遥控器控制主站手动掉电/上电**，不是持续性 EtherCAT 硬件断线。
-- **异常持续时间**：从 {first_event_time.strftime('%H:%M:%S.%f')[:-3]} 到 {recovery_time.strftime('%H:%M:%S.%f')[:-3]}，约 **{duration_text}**。
-- **恢复结果**：snowball 侧出现 `ethercat ok` / `ecm ok` / `EV_EXP_RELEASE_ECM` 类恢复信号，说明主站已恢复。
-
-## 二、状态机与工作流程（按时间顺序）
-| 时间 / clk | 事件 | 说明 |
-|---|---|---|
-| {fmt_log_time(err_line)} | `ecm err` | snowball 检测到 ECM 主站异常。 |
-| {fmt_log_time(exit_line)} | `ethercat exit` / `EV_EXP_ECM` | 主站掉电/退出信号上报，进入 ECM 异常保护。 |
-| {fmt_log_time(recovery_line)} | `ethercat ok` / `ecm ok` | 主站恢复，异常释放。 |
-| {fmt_log_time(final_mode_line)} | 后续状态 | {final_mode_line.strip() if final_mode_line else "日志未体现最终业务状态。"} |
-
-## 三、异常与错误分析
-| 证据 | 日志 |
-|---|---|
-| snowball 异常 | `{err_line.strip()}` |
-| snowball 退出/异常事件 | `{exit_line.strip()}` |
-| ethercat 侧直接证据 | `{failed_line.strip()}` |
-| ethercat 恢复/重启迹象 | `{(recovery_hint or '日志未体现').strip()}` |
-| snowball 恢复 | `{recovery_line.strip()}` |
-
-## 四、风险与建议
-- 这类日志优先按**人为遥控器控制主站掉电/上电**归因；如果是预期操作，可记录为瞬时告警并关注是否自恢复。
-- 若同类异常频繁出现、持续时间超过 {ECM_MANUAL_POWER_MAX_RECOVERY_SECONDS} 秒，或日志同时出现 `link_status`、`lost link cnt`、状态字 `0x0` 等证据，再升级为硬件链路/从站掉线排查。
-- 建议在测试记录里补充“是否有遥控器控制主站掉电/上电操作”这一现场条件，便于后续自动判定。
-
-## 五、EtherCAT 主站异常根因
-- **最终根因**：遥控器控制主站手动掉电/上电导致 EtherCAT/ECM 短暂退出，随后主站恢复。
-- **依据**：异常链路完整闭环为 `ecm err / ethercat exit` → `ethercat ok / ecm ok`，且未命中硬件断线规则摘要中的 `link_status`、`lost link cnt`、状态字 `0x0` 等明确断线证据。
-""".strip()
-
-
-def try_render_local_log_analysis(path, extracted=None):
-    """已知低风险模式直接本地模板回复，避免为重复问题消耗 Copilot token。"""
-    file_path = Path(path)
-    extracted = extracted or extract_log_evidence(file_path)
-    snowball_lines, _matched_total, _line_truncated = extracted["snowball"]
-    if not snowball_lines:
-        return None
-    ecm_anomaly, _evidence = detect_ecm_anomaly(snowball_lines)
-    if not ecm_anomaly:
-        return None
-    ethercat_lines, _ec_total, _ec_truncated = extracted["ethercat"]
-    if not ethercat_lines:
-        return None
-    diagnostic_lines = extracted["diagnostic"]
-    mixed_fault_answer = render_recovered_comm_with_motor_fault(
-        snowball_lines, diagnostic_lines
-    )
-    if mixed_fault_answer:
-        return mixed_fault_answer
-    persistent_drop_answer = render_persistent_comm_drop_log_analysis(
-        snowball_lines, ethercat_lines
-    )
-    if persistent_drop_answer:
-        return persistent_drop_answer
-    motor_trigger_answer = render_motor_triggered_comm_drop(
-        snowball_lines, ethercat_lines
-    )
-    if motor_trigger_answer:
-        return motor_trigger_answer
-    return render_manual_power_log_analysis(file_path, snowball_lines, ethercat_lines)
 
 
 def render_normal_log_analysis(source):
@@ -5160,21 +4616,6 @@ def run_copilot(job, job_dir, heartbeat=None):
         set_job_progress(job["job_id"], "读取日志", "正在读取并提取 snowball 节点日志。")
         safe_update_job_card(job["job_id"])
         extracted = extract_log_evidence(prompt_source, heartbeat=pulse)
-        local_answer = try_render_local_log_analysis(
-            prompt_source,
-            extracted=extracted,
-        )
-        if local_answer:
-            local_evidence = "\n".join(
-                extracted["snowball"][0] + extracted["ethercat"][0]
-            )
-            try:
-                validate_log_analysis_answer(local_evidence, local_answer)
-                return local_answer
-            except RuntimeError:
-                logging.exception(
-                    "deterministic log answer failed evidence gate; falling back to Copilot"
-                )
         prompt_source = prepare_log_analysis_source(
             prompt_source,
             extracted=extracted,

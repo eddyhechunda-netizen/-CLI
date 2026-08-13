@@ -175,89 +175,25 @@ class PreprocessingRegressionTests(unittest.TestCase):
         self.assertEqual(legacy_diagnostic, extracted["diagnostic"])
         self.assertGreaterEqual(heartbeat.call_count, 2)
 
-    def test_motor_triggered_comm_drop_returns_deterministic_answer(self):
-        snowball = [
-            "2026-08-08 11:12:00.203 E/snowball(mroslaunch)(1/1): >>>>>|ecm err|",
-            "2026-08-08 11:12:28.825 I/snowball(mroslaunch)(1/1): ethercat ok! ecm ok",
-        ]
-        ethercat = [
-            *[
-                f"2026-08-08 11:12:00.200 W/ethercat(mroslaunch)(1/1): "
-                f"motor{motor} something happened, statusword 0x0 code 0xf"
-                for motor in range(1, 11)
-            ],
-            "2026-08-08 11:12:00.202 E/ethercat(mroslaunch)(1/1): "
-            "Motor = 65535, 0xf10b, Too many loss.",
-            "2026-08-08 11:12:11.429 I/ethercat(mroslaunch)(1/1): "
-            "[90] 'EtherCAT lost link cnt of port1': 1",
-            *[
-                f"2026-08-08 11:12:28.800 I/ethercat(mroslaunch)(1/1): "
-                f"Motor {motor} (slave {motor + 1}) enabled successfully."
-                for motor in range(1, 11)
-            ],
-        ]
+    def test_extraction_preserves_slave_block_header_for_attribution(self):
+        log = "\n".join(
+            [
+                "2026-08-08 11:12:11.428 I/ethercat(mroslaunch)(1/1): EcApplication.cpp(1090) clk(1) Slave1",
+                "2026-08-08 11:12:11.429 I/ethercat(mroslaunch)(1/1): EcApplication.cpp(1119) clk(2) [90] 'EtherCAT lost link cnt of port1': 1",
+                "2026-08-08 11:12:11.430 I/ethercat(mroslaunch)(1/1): EcApplication.cpp(1090) clk(3) Slave6",
+                "2026-08-08 11:12:11.431 I/ethercat(mroslaunch)(1/1): EcApplication.cpp(1116) clk(4) [8f] 'EtherCAT lost link cnt of port0': 1",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "sample.log"
+            path.write_text(log, encoding="utf-8")
+            extracted = bot.extract_log_evidence(path)
+            legacy = bot._extract_ethercat_diagnostic_lines(path)
 
-        answer = bot.render_motor_triggered_comm_drop(snowball, ethercat)
-
-        self.assertIn("属于通信掉线", answer)
-        self.assertIn("不是遥控器手动掉电", answer)
-        self.assertIn("电机1-10", answer)
-        self.assertIn("[90]=1", answer)
-        bot.validate_log_analysis_answer("\n".join(ethercat), answer)
-
-    def test_slave1_uplink_lost_reports_branch_topology_root_cause(self):
-        snowball = [
-            "2026-08-08 11:12:00.203 E/snowball(mroslaunch)(1/1): >>>>>|ecm err|",
-            "2026-08-08 11:12:28.825 I/snowball(mroslaunch)(1/1): ethercat ok! ecm ok",
-        ]
-        motor_warnings = [
-            f"2026-08-08 11:12:00.200 W/ethercat(mroslaunch)(1/1): "
-            f"motor{motor} something happened, "
-            f"statusword {'0xffff' if motor == 10 else '0x0'} code 0xf"
-            for motor in range(1, 11)
-        ]
-        enable_lines = [
-            f"2026-08-08 11:12:28.800 I/ethercat(mroslaunch)(1/1): "
-            f"Motor {motor} (slave {motor + 1}) enabled successfully."
-            for motor in range(1, 11)
-        ]
-        ethercat = [
-            *motor_warnings,
-            "2026-08-08 11:12:00.202 E/ethercat(mroslaunch)(1/1): "
-            "Motor = 65535, 0xf10b, Too many loss.",
-            "2026-08-08 11:12:11.428 I/ethercat(mroslaunch)(1/1): Slave1",
-            "2026-08-08 11:12:11.429 I/ethercat(mroslaunch)(1/1): "
-            "[90] 'EtherCAT lost link cnt of port1': 1",
-            *enable_lines,
-        ]
-
-        answer = bot.render_motor_triggered_comm_drop(snowball, ethercat)
-
-        self.assertIn("[90]=1 on Slave 1", answer)
-        self.assertIn("分支器A", answer)
-        self.assertIn("通信掉线（暂时性）", answer)
-        self.assertIn("分支A下游", answer)
-        self.assertIn("分支B因级联效应", answer)
-        self.assertIn("Slave 1 port1=1", answer)
-        for motor in range(1, 11):
-            self.assertIn(f"电机{motor}", answer)
-        bot.validate_log_analysis_answer("\n".join(ethercat), answer)
-
-    def test_attribute_lost_link_counters_maps_to_slave(self):
-        ethercat = [
-            "2026-08-08 11:12:11.428 I/ethercat(mroslaunch)(1/1): Slave1",
-            "2026-08-08 11:12:11.429 I/ethercat(mroslaunch)(1/1): "
-            "[90] 'EtherCAT lost link cnt of port1': 1",
-            "2026-08-08 11:12:11.434 I/ethercat(mroslaunch)(1/1): Slave6",
-            "2026-08-08 11:12:11.434 I/ethercat(mroslaunch)(1/1): "
-            "[8f] 'EtherCAT lost link cnt of port0': 1",
-            "2026-08-08 11:12:11.434 I/ethercat(mroslaunch)(1/1): "
-            "[91] 'EtherCAT lost link cnt of port2': 0",
-        ]
-        attributed = bot.attribute_lost_link_counters(ethercat)
-        self.assertIn((1, 1, "port1", 1), attributed)
-        self.assertIn((6, 0, "port0", 1), attributed)
-        self.assertNotIn((6, 2, "port2", 0), attributed)
+        diagnostic = extracted["diagnostic"]
+        self.assertTrue(any(line.endswith("Slave1") for line in diagnostic))
+        self.assertTrue(any(line.endswith("Slave6") for line in diagnostic))
+        self.assertEqual(legacy, diagnostic)
 
 
 class CorrectionLoopRegressionTests(unittest.TestCase):
@@ -294,7 +230,6 @@ class CorrectionLoopRegressionTests(unittest.TestCase):
                     "diagnostic": [],
                 },
             ),
-            patch.object(bot, "try_render_local_log_analysis", return_value=None),
             patch.object(bot, "prepare_log_analysis_source", return_value="evidence"),
             patch.object(bot, "build_prompt", return_value="FULL ORIGINAL PROMPT"),
             patch.object(bot, "set_job_progress"),
@@ -304,8 +239,7 @@ class CorrectionLoopRegressionTests(unittest.TestCase):
             patch.object(bot, "LOG_ANALYSIS_MAX_REVISIONS", 2),
         )
         with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], \
-                patches[6], patches[7], patches[8], patches[9], patches[10], \
-                patches[11]:
+                patches[6], patches[7], patches[8], patches[9], patches[10]:
             result = bot.run_copilot(
                 {"job_id": "job-test", "action": "log_analysis", "source": "x"},
                 bot.ROOT,
