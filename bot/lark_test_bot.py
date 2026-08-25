@@ -110,6 +110,20 @@ CLEANUP_INTERVAL = int(
 URL_RE = re.compile(
     r"https?://[^\s<>\"']+/(?:docx|doc|wiki)/[A-Za-z0-9_-]+[^\s<>\"']*"
 )
+# 匹配任意飞书/Lark 站内链接，用于识别“是飞书链接但类型不受支持”的情形。
+FEISHU_LINK_RE = re.compile(
+    r"https?://[^\s<>\"']*(?:feishu\.cn|larksuite\.com|larkoffice\.com)"
+    r"/([A-Za-z0-9_-]+)/[^\s<>\"']+",
+    re.IGNORECASE,
+)
+# 飞书文档 API 无法直接读取的链接类型 -> 友好说明。
+UNSUPPORTED_FEISHU_LINK_TYPES = {
+    "sync": "同步块文档（/sync/）",
+    "sheets": "电子表格（/sheets/）",
+    "base": "多维表格（/base/）",
+    "file": "云盘文件（/file/）",
+    "drive": "云盘文件（/drive/）",
+}
 ARTIFACT_URL_RE = re.compile(r"https?://[^\s<>\"']+")
 WEEKLY_RE = re.compile(r"^(?:写周报|生成周报|周报)\s*[:：]?\s*(.*)$", re.DOTALL)
 DOC_QA_RE = re.compile(
@@ -3223,6 +3237,28 @@ def extract_url(content):
     return match.group(0).rstrip("。，；、)") if match else None
 
 
+def detect_unsupported_feishu_link(content):
+    """识别“是飞书链接、但内容无法直接读取”的链接（如 /sync/ 同步块）。
+
+    仅当消息里没有可处理的 docx/doc/wiki 链接时才判定，返回给用户的可操作
+    提示文本；否则返回 None。用于避免这类链接落入“文字问答”而给出误导性拒绝。
+    """
+    if extract_url(content):
+        return None
+    match = FEISHU_LINK_RE.search(content or "")
+    if not match:
+        return None
+    kind = match.group(1).lower()
+    label = UNSUPPORTED_FEISHU_LINK_TYPES.get(kind)
+    if not label:
+        return None
+    return (
+        f"检测到这是一个飞书{label}链接，暂不支持直接读取其内容。\n"
+        "请改用原始的 docx / wiki 文档链接（同步块请提供其所在的源文档链接），"
+        "或直接把需求正文粘贴到对话里，我再帮你生成测试用例。"
+    )
+
+
 def group_bot_mentioned(event):
     if event.get("chat_type") != "group":
         return True
@@ -5225,6 +5261,9 @@ def handle_message_event(event):
                 else:
                     doc_qa = extract_doc_qa(content)
                     direct_action, source = extract_direct_action(content)
+                    unsupported_link_hint = (
+                        None if source else detect_unsupported_feishu_link(content)
+                    )
                     if doc_qa:
                         doc_url, question = doc_qa
                         ensure_job_admitted(event["sender_id"], "doc_qa")
@@ -5248,6 +5287,12 @@ def handle_message_event(event):
                             )
                         update_job(job_id, card_message_id=card_message_id)
                         queue_job(job_id, "doc_qa")
+                    elif unsupported_link_hint:
+                        reply(
+                            message_id,
+                            unsupported_link_hint,
+                            "unsupported-link",
+                        )
                     elif not source:
                         ensure_job_admitted(event["sender_id"], "chat")
                         job_id = create_job(

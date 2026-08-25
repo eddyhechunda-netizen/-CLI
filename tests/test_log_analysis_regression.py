@@ -196,6 +196,44 @@ class PreprocessingRegressionTests(unittest.TestCase):
         self.assertEqual(legacy, diagnostic)
 
 
+class UnsupportedFeishuLinkTests(unittest.TestCase):
+    SYNC = "https://cwjgfm21di.feishu.cn/sync/VL8IdjstWseEkabT6n1cLVSAngd"
+    DOCX = "https://cwjgfm21di.feishu.cn/docx/ABCdef123456"
+
+    def test_bare_sync_link_detected(self):
+        hint = bot.detect_unsupported_feishu_link(self.SYNC)
+        self.assertIsNotNone(hint)
+        self.assertIn("同步块", hint)
+
+    def test_sync_link_with_generate_prefix_detected(self):
+        hint = bot.detect_unsupported_feishu_link(f"生成测试用例 {self.SYNC}")
+        self.assertIsNotNone(hint)
+        self.assertIn("同步块", hint)
+
+    def test_supported_docx_link_not_flagged(self):
+        self.assertIsNone(bot.detect_unsupported_feishu_link(self.DOCX))
+        self.assertIsNone(
+            bot.detect_unsupported_feishu_link(f"生成测试用例 {self.DOCX}")
+        )
+
+    def test_plain_text_without_link_not_flagged(self):
+        self.assertIsNone(bot.detect_unsupported_feishu_link("帮我生成测试用例"))
+
+    def test_sheets_and_base_links_detected(self):
+        self.assertIn(
+            "电子表格",
+            bot.detect_unsupported_feishu_link(
+                "https://x.feishu.cn/sheets/XYZ789"
+            ),
+        )
+        self.assertIn(
+            "多维表格",
+            bot.detect_unsupported_feishu_link(
+                "https://x.feishu.cn/base/QWE456"
+            ),
+        )
+
+
 class CorrectionLoopRegressionTests(unittest.TestCase):
     class FakeProcess:
         def __init__(self, answer):
