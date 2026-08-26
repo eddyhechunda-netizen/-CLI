@@ -348,7 +348,7 @@ docx 需求另需 `python-docx`。
 - `references/report_schema.md` — 测试报告 JSON 输入格式
 - `references/quality_review_schema.md` — 需求质量检查数据格式
 - `references/execution_workflow.md` — 执行结果、缺陷和追踪矩阵生成流程
-- `references/ethercat_master_diagnosis.md` — **EtherCAT 主站(ECM)异常诊断依据**：日志分析判定主站异常后，只分析 ethercat 节点打印，按本文件的定位方法（状态字/link_status/lost link cnt）、按机器形态（SN 前缀 DACH 双臂 / SF 双足 / WF 轮足 / HU_D04 人形）选用的网络拓扑与从站号对照表、以及驱动故障码保护规则给唯一根因（依据飞书 wiki 沉淀）；若某形态暂无拓扑对照表，只依据日志直接出现的 slave/端口证据定位，禁止套用其他形态的表
+- `references/ethercat_master_diagnosis.md` — **EtherCAT 主站(ECM)异常诊断依据**：日志分析判定主站异常后，只分析 ethercat 节点打印，按本文件的定位方法（状态字/link_status/lost link cnt）、按机器形态（SN 前缀 DACH 双臂 2.1 / SF 双足 2.2 / WF 轮足 2.3 / HU_D04 人形 2.4）选用的网络拓扑与从站号对照表、以及驱动故障码保护规则给唯一根因（依据飞书 wiki 沉淀）
 - `assets/example_cases.json` — JSON 范本
 - `assets/example_report.json` — 测试报告 JSON 范本
 - `assets/example_quality_review.json` — 需求质量检查范本
