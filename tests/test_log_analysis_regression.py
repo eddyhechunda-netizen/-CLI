@@ -280,6 +280,71 @@ class HumanoidNodeSupportTests(unittest.TestCase):
         self.assertIn("mission_engine", str(ctx.exception))
 
 
+class HumanoidWorkflowTests(unittest.TestCase):
+    SAFETY_LOG = "\n".join(
+        [
+            "2026-08-08 11:00:00.100 I/mission_engine(mroslaunch)(1/1): state:ST_IDLE SN:HU_D04A001",
+            "2026-08-08 11:00:01.000 E/monitor(mroslaunch)(2/2): EthercatMonitor add ethercatCommunicationExp motor 5 action HALF_STAND",
+            "2026-08-08 11:00:01.100 E/ethercat(mroslaunch)(3/3): motor5 something happened, statusword 0x1208 code 0x0",
+            "2026-08-08 11:00:01.200 E/ethercat(mroslaunch)(3/3): Motor = 65535, 0xf10b, Too many loss.",
+            "2026-08-08 11:00:02.000 I/monitor(mroslaunch)(2/2): DiagnosticValue name:ability/walk level:OK",
+            "2026-08-08 11:00:02.100 I/monitor(mroslaunch)(2/2): DiagnosticValue name:ability_running message:stand",
+            "2026-08-08 11:00:03.000 I/monitor(mroslaunch)(2/2): PeripheralMonitor bat_vol:48.2 battery:80 current:5.0",
+        ]
+    )
+    NORMAL_LOG = "\n".join(
+        [
+            "2026-08-08 11:00:00.100 I/mission_engine(mroslaunch)(1/1): state:ST_IDLE SN:HU_D04A001",
+            "2026-08-08 11:00:01.000 I/monitor(mroslaunch)(2/2): EthercatMonitor ethercatResetNormal",
+            "2026-08-08 11:00:02.000 I/monitor(mroslaunch)(2/2): DiagnosticValue name:ability/walk level:OK",
+            "2026-08-08 11:00:02.100 I/monitor(mroslaunch)(2/2): DiagnosticValue name:imu level:OK",
+            "2026-08-08 11:00:03.000 I/monitor(mroslaunch)(2/2): PeripheralMonitor bat_vol:48.2 battery:80 current:5.0",
+        ]
+    )
+
+    def _prepare(self, log):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "humanoid.log.active"
+            path.write_text(log, encoding="utf-8")
+            return bot.prepare_log_analysis_source(path)
+
+    def test_safety_anomaly_detected_and_triggers_deep_analysis(self):
+        source = self._prepare(self.SAFETY_LOG)
+        self.assertIn(bot.HUMANOID_ANALYSIS_MARKER, source)
+        self.assertIn("EthercatMonitor 安全异常事件", source)
+        self.assertIn("HALF_STAND", source)
+        # 安全异常必须触发主站下钻深度分析区块。
+        self.assertIn(bot.ECM_DEEP_ANALYSIS_MARKER, source)
+
+    def test_no_safety_anomaly_skips_deep_analysis_but_keeps_state(self):
+        source = self._prepare(self.NORMAL_LOG)
+        self.assertIn(bot.HUMANOID_ANALYSIS_MARKER, source)
+        self.assertIn("无 ethercat 安全异常", source)
+        self.assertNotIn(bot.ECM_DEEP_ANALYSIS_MARKER, source)
+        # 状态分析证据（DiagnosticValue / PeripheralMonitor）仍必须提供。
+        self.assertIn("DiagnosticValue", source)
+        self.assertIn("PeripheralMonitor", source)
+
+    def test_ew_focus_list_flags_concentrated_node(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "humanoid.log.active"
+            path.write_text(self.SAFETY_LOG, encoding="utf-8")
+            extracted = bot.extract_humanoid_evidence(path)
+        counts = extracted["ew_node_counts"]
+        self.assertGreaterEqual(counts.get("ethercat", {}).get("E", 0), 2)
+        self.assertTrue(extracted["has_safety_anomaly"])
+
+    def test_tron_snowball_log_has_no_humanoid_block(self):
+        log = "\n".join(
+            [
+                "2026-08-08 11:00:00.100 I/snowball(mroslaunch)(1/1): state:ST_IDLE SN:SF_TRON2A",
+                "2026-08-08 11:00:01.000 I/monitor(mroslaunch)(2/2): DiagnosticValue name:imu level:OK",
+            ]
+        )
+        source = self._prepare(log)
+        self.assertNotIn(bot.HUMANOID_ANALYSIS_MARKER, source)
+
+
 class CorrectionLoopRegressionTests(unittest.TestCase):
     class FakeProcess:
         def __init__(self, answer):

@@ -70,6 +70,26 @@ xlsx""根据需求生成测试报告""读取这个飞书需求，生成后放到
    “这是一个正常日志，无 EtherCAT 通信异常或电机故障”，不要输出异常与错误分析、
    风险与建议或 EtherCAT 主站异常根因。
 
+### 人形机器（mission_engine）专项流程
+
+主节点为 `mission_engine`（SN 前缀 HU_D04）的人形日志，服务会额外附上 monitor 节点、
+全局 E/W、DiagnosticValue、PeripheralMonitor 专项证据；按以下三步分析：
+
+1. **开局分析**：先看 monitor 节点 EthercatMonitor 事件——出现
+   `add ethercatCommunicationExp/HardwareExp/HardwareFatal/CommunicationFatal` 即判为
+   **有 ethercat 安全异常**，记录异常时间点、电机编号、触发动作（HALF_STAND/DAMPING），
+   进入第二步；仅 `ethercatResetNormal` 或无 EthercatMonitor 事件则判为**无安全异常**，
+   直接进入第三步。同时全局扫描 `E/`、`W/` 级别行：同一节点 E+W≥3（或同一时间窗 ≥5）
+   加入**重点关注列表**深入，零星 1~2 条 Warn 只记录。
+2. **有 ethercat 安全异常时**：按上文常规 ECM 主站流程分析（读知识库、状态字/link_status/
+   lost link 计数、按 HU_D04 用 2.4 拓扑表换算 slave、按「三·人形」查驱动故障码）。
+3. **状态分析（任何人形日志都执行）**：提取 DiagnosticValue 按 name 分类——`ability/*`=能力
+   加载(OK/ERROR/WARN 名单)、`ability_running`=当前运行能力时间线、`version/ecm_version/
+   motor_version`=版本、`imu/ethercat/navigation/audio_device`=硬件健康、`internet_online/
+   wifi_*/lan_index`=网络、`Robot_State_Detection/Fall_Detection/ControllerState`=运动姿态；
+   再看 PeripheralMonitor：bat_vol/battery 平稳下降为正常电池消耗，一分钟内电压骤降 >2V 或
+   电流突增 >50% 标记**电源异常**并关联当时运行能力。
+
 ## 产出长什么样
 
 一个 .xlsx（规格对齐团队真实交付的测试用例表）：

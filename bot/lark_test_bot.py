@@ -190,6 +190,40 @@ LOG_ANALYSIS_ETHERCAT_WINDOW_AFTER_SECONDS = int(
 )
 # 检测到主站异常深度分析区块的标记（build_prompt 据此决定是否输出根因分析小节）。
 ECM_DEEP_ANALYSIS_MARKER = "【EtherCAT 主站异常深度分析】"
+# ---- 人形机器（mission_engine 主节点）专项分析 ----
+# 人形日志分析流程：开局先看 monitor 节点 EthercatMonitor 安全事件 + 全局 E/W 扫描；
+# 有 ethercat 安全异常时按主站 skill 下钻；最后做 DiagnosticValue / PeripheralMonitor 状态分析。
+LOG_ANALYSIS_MONITOR_NODE = os.environ.get(
+    "LARK_TEST_BOT_LOG_ANALYSIS_MONITOR_NODE", "monitor"
+)
+# monitor 节点 EthercatMonitor「安全异常」事件关键字（add ethercatCommunicationExp /
+# HardwareExp / HardwareFatal / CommunicationFatal 任一命中即视为有 ethercat 安全异常）。
+HUMANOID_ECAT_MONITOR_TOKEN = "ethercatmonitor"
+HUMANOID_ECAT_SAFETY_PATTERNS = (
+    "communicationexp",
+    "hardwareexp",
+    "hardwarefatal",
+    "communicationfatal",
+)
+# 仅出现该事件（或无 EthercatMonitor 事件）视为无安全异常。
+HUMANOID_ECAT_RESET_PATTERN = "ethercatresetnormal"
+# 触发动作关键字（记录到证据里，便于结论标注）。
+HUMANOID_ECAT_ACTION_RE = re.compile(r"HALF_STAND|DAMPING", re.IGNORECASE)
+# 人形状态分析证据：DiagnosticValue 行、PeripheralMonitor 电源行。
+HUMANOID_DIAGNOSTIC_VALUE_TOKEN = "diagnosticvalue"
+HUMANOID_PERIPHERAL_MONITOR_TOKEN = "peripheralmonitor"
+# E/ 与 W/ 级别日志行（logcat 风格：时间戳后紧跟 级别/节点(...)）。
+LOG_LEVEL_EW_RE = re.compile(r"\s([EW])/([A-Za-z0-9_]+)\(")
+# 人形专项证据区块标记（build_prompt 据此追加人形分析流程小节）。
+HUMANOID_ANALYSIS_MARKER = "【人形机器专项分析证据】"
+# 人形各证据块喂给模型的字符预算，封顶 token。
+HUMANOID_EVIDENCE_MAX_CHARS = int(
+    os.environ.get("LARK_TEST_BOT_HUMANOID_EVIDENCE_MAX_CHARS", "18000")
+)
+# 每类人形证据保留的最大命中行数（保头尾骨架，封顶内存）。
+HUMANOID_EVIDENCE_MAX_MATCH_LINES = int(
+    os.environ.get("LARK_TEST_BOT_HUMANOID_EVIDENCE_MAX_MATCH_LINES", "20000")
+)
 # snowball 里判定“EtherCAT 主站(ECM)异常”的信号：显式报错标记 + 非零诊断 + 状态机故障态。
 ECM_ANOMALY_ERROR_RE = re.compile(r"ecm\s*err", re.IGNORECASE)
 ECM_DIAG_RE = re.compile(
@@ -3557,7 +3591,23 @@ ethercat 节点异常窗口和全文件诊断证据，请据此还原全过程�
 - lost link / 帧错误计数按从站分块打印：每块以形如 `... Slave1`、`... Slave6` 的表头开始，其后的 `[8f]=port0 / [90]=port1 / [91]=port2 / [92]=port3` 计数都归属于该表头所指从站。判定非零计数时必须先回看它所属的 `SlaveN` 表头，再按参考文件的定位方法（`[90]=1 on SlaveN` 表示该从站 port1 上联链路曾丢链）结合 SN 拓扑表把从站换算成电机/链路位置，禁止脱离所属从站泛泛地写 `[90]=1`。
 - 输出前必须执行证据回查：逐一列出日志中所有异常电机及其 statusword/code，确认每个异常电机都已进入最终结论；逐一核对所有非零计数器及其所属从站，禁止把“lost link 全为 0”扩大写成“所有 EtherCAT 错误计数器均为 0”；恢复结论必须有异常发生后的恢复日志支持。
 
-日志正文（仅机器状态主节点，已去重压缩）：
+**人形机器专项分析流程（条件性，务必严格遵守）**：
+- 仅当下方日志正文中出现「{HUMANOID_ANALYSIS_MARKER}」区块时（即主节点为 mission_engine 的人形机器），才必须按下面三步流程分析，并在正文相应小节体现；若无该区块，则忽略本流程（按 TRON2 常规流程）。
+- **第一步 · 开局分析**：
+  - 先看区块内 monitor 节点 EthercatMonitor 事件：若有「安全异常事件」（add ethercatCommunicationExp / HardwareExp / HardwareFatal / CommunicationFatal），判为**有 ethercat 安全异常**，记录异常时间点、涉及电机编号、触发动作（HALF_STAND / DAMPING），并进入第二步主站下钻；若仅 ethercatResetNormal 或无 EthercatMonitor 事件，判为**无安全异常**，直接进入第三步状态分析。
+  - 再看区块内「E/W 节点集中度（重点关注列表）」：某节点 E/W 集中出现（阈值 E+W≥3）的加入重点关注并结合其 E/W 原始行深入；仅零星 1~2 条 Warn 的只记录不深入。
+- **第二步 · 有 ethercat 安全异常时**：按上文「EtherCAT 主站异常深度分析」同一套主站 skill 流程分析（读取知识库、状态字/link_status/lost link 计数、按 HU_D04 用 2.4 拓扑表把 motor 换算 slave、按人形驱动故障码「三·人形」查错误码），给出主站异常根因；本步骤输出并入第五节。
+- **第三步 · 状态分析（任何人形日志都执行）**：基于区块内 DiagnosticValue 行按 name 分类汇总——
+  - `ability/*` → 能力加载状态：统计成功(OK)/失败(ERROR)/禁用(WARN)数量与具体名单；
+  - `ability_running` → 当前运行能力：提取 message 并追踪随时间变化，生成能力切换时间线；
+  - `version`/`ecm_version`/`motor_version` → 系统版本信息：取最新值；
+  - `imu`/`ethercat`/`navigation`/`audio_device` → 硬件健康状态：看 level 是否 OK；
+  - `internet_online`/`wifi_*`/`lan_index` → 网络连接状态；
+  - `Robot_State_Detection`/`Fall_Detection`/`ControllerState` → 运动姿态状态。
+  再基于区块内 PeripheralMonitor 电源数据：bat_vol 持续下降且 battery 百分比同步降低则正常记录电池消耗曲线；若某一分钟内电压骤降 >2V 或电流突增 >50%，标记为**电源异常**并关联当时运行能力（是否大电流动作）。
+  - 状态分析结果放入第一/三节（总体结论 / 风险与建议）中体现，简洁列关键项，不要逐条堆砌全部 DiagnosticValue。
+
+日志正文（机器状态主节点已去重压缩；人形机器附 monitor/E-W/DiagnosticValue/PeripheralMonitor 专项证据）：
 {source}
 """.strip()
     if job["action"] == "doc_qa":
@@ -4031,6 +4081,173 @@ def extract_log_evidence(file_path, heartbeat=None):
     return result
 
 
+def is_humanoid_node(node):
+    """判断主节点是否为人形机器（mission_engine）。"""
+    target = (LOG_ANALYSIS_HUMANOID_NODE or "").strip().lower()
+    return bool(node) and bool(target) and node.strip().lower() == target
+
+
+def extract_humanoid_evidence(file_path, heartbeat=None):
+    """人形专项证据的单次流式扫描。
+
+    收集：monitor 节点 EthercatMonitor「安全异常」事件 / ethercatResetNormal 事件、
+    全局 E/W 级别行（并按节点计数以判定重点关注列表）、DiagnosticValue 行、
+    monitor 节点 PeripheralMonitor 电源行。各桶保留头尾骨架并封顶行数，控内存与 token。
+    """
+    file_path = Path(file_path)
+    cap = max(HUMANOID_EVIDENCE_MAX_MATCH_LINES, 2)
+    head_cap = cap // 2
+    tail_cap = cap - head_cap
+    monitor_token = f"/{(LOG_ANALYSIS_MONITOR_NODE or 'monitor').lower()}("
+
+    def _bucket():
+        return {"head": [], "tail": deque(maxlen=tail_cap), "total": 0}
+
+    buckets = {
+        name: _bucket()
+        for name in ("safety", "reset", "ew", "diagnostic", "peripheral")
+    }
+    ew_node_counts = {}
+    next_heartbeat = 0.0
+
+    def pulse(force=False):
+        nonlocal next_heartbeat
+        if heartbeat is None:
+            return
+        now = time.monotonic()
+        if not force and now < next_heartbeat:
+            return
+        try:
+            heartbeat()
+        except Exception:
+            logging.exception("failed to refresh heartbeat during humanoid extraction")
+        next_heartbeat = now + max(1, min(5, STATUS_REFRESH_INTERVAL))
+
+    def append(bucket, stripped):
+        bucket["total"] += 1
+        if len(bucket["head"]) < head_cap:
+            bucket["head"].append(stripped)
+        else:
+            bucket["tail"].append(stripped)
+
+    pulse(force=True)
+    try:
+        with file_path.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                pulse()
+                lowered = line.lower()
+                stripped = line.rstrip("\n")
+                ew = LOG_LEVEL_EW_RE.search(line)
+                if ew:
+                    node = ew.group(2).lower()
+                    counts = ew_node_counts.setdefault(node, {"E": 0, "W": 0})
+                    counts[ew.group(1)] += 1
+                    append(buckets["ew"], stripped)
+                if HUMANOID_DIAGNOSTIC_VALUE_TOKEN in lowered:
+                    append(buckets["diagnostic"], stripped)
+                if monitor_token in lowered:
+                    if HUMANOID_ECAT_MONITOR_TOKEN in lowered:
+                        if any(p in lowered for p in HUMANOID_ECAT_SAFETY_PATTERNS):
+                            append(buckets["safety"], stripped)
+                        elif HUMANOID_ECAT_RESET_PATTERN in lowered:
+                            append(buckets["reset"], stripped)
+                    if HUMANOID_PERIPHERAL_MONITOR_TOKEN in lowered:
+                        append(buckets["peripheral"], stripped)
+    except OSError as exc:
+        raise RuntimeError(f"无法读取上传的日志文件：{exc}")
+    finally:
+        pulse(force=True)
+
+    result = {"ew_node_counts": ew_node_counts}
+    for name, bucket in buckets.items():
+        result[name] = _finalize_node_capture(
+            bucket["head"], bucket["tail"], bucket["total"], cap
+        )
+    result["has_safety_anomaly"] = buckets["safety"]["total"] > 0
+    return result
+
+
+def build_humanoid_analysis_block(extracted_humanoid):
+    """构造人形专项分析证据区块（开局证据 + 状态分析证据），附 HUMANOID_ANALYSIS_MARKER。"""
+    safety_lines, safety_total, _s_trunc = extracted_humanoid["safety"]
+    reset_lines, reset_total, _r_trunc = extracted_humanoid["reset"]
+    ew_lines, ew_total, _e_trunc = extracted_humanoid["ew"]
+    diag_lines, diag_total, _d_trunc = extracted_humanoid["diagnostic"]
+    peri_lines, peri_total, _p_trunc = extracted_humanoid["peripheral"]
+    ew_node_counts = extracted_humanoid.get("ew_node_counts", {})
+
+    # 重点关注列表：同一节点 E/W 合计 ≥3 条。
+    focus = sorted(
+        (
+            (node, c["E"], c["W"])
+            for node, c in ew_node_counts.items()
+            if (c["E"] + c["W"]) >= 3
+        ),
+        key=lambda item: (item[1] + item[2]),
+        reverse=True,
+    )
+    if focus:
+        focus_text = "\n".join(
+            f"  · {node}：E={e} 条 / W={w} 条" for node, e, w in focus[:20]
+        )
+    else:
+        focus_text = "  · （无节点达到集中出现阈值，仅零星 E/W）"
+
+    if extracted_humanoid.get("has_safety_anomaly"):
+        safety_body, _all, _kept = _reduce_snowball_lines(
+            safety_lines, HUMANOID_EVIDENCE_MAX_CHARS
+        )
+        safety_section = (
+            f"-- monitor 节点 EthercatMonitor 安全异常事件（共 {safety_total} 条，"
+            "含触发时间/电机/动作 HALF_STAND|DAMPING）--\n"
+            f"{safety_body}"
+        )
+    else:
+        reset_note = f"（仅 ethercatResetNormal {reset_total} 条，无安全异常）" if reset_total else "（未发现 EthercatMonitor 事件）"
+        safety_section = (
+            "-- monitor 节点 EthercatMonitor 安全异常事件 --\n"
+            f"未检测到 ethercatCommunicationExp/HardwareExp/HardwareFatal/CommunicationFatal 事件"
+            f"{reset_note}，判为**无 ethercat 安全异常**，跳过主站下钻，直接做状态分析。"
+        )
+
+    ew_body, _ew_all, _ew_kept = _reduce_snowball_lines(
+        ew_lines, HUMANOID_EVIDENCE_MAX_CHARS
+    )
+    ew_section = (
+        f"-- 全局 E/W 级别日志（共 {ew_total} 条，节点计数见上）--\n{ew_body}"
+        if ew_lines
+        else "-- 全局 E/W 级别日志 --\n（未发现 E/W 级别日志。）"
+    )
+    diag_body, _diag_all, _diag_kept = _reduce_snowball_lines(
+        diag_lines, HUMANOID_EVIDENCE_MAX_CHARS
+    )
+    diag_section = (
+        f"-- DiagnosticValue 状态行（共 {diag_total} 条，按 name 分类：ability*/"
+        "ability_running/version*/imu·ethercat·navigation·audio_device/internet·wifi·lan/"
+        f"Robot_State_Detection·Fall_Detection·ControllerState）--\n{diag_body}"
+        if diag_lines
+        else "-- DiagnosticValue 状态行 --\n（未提取到 DiagnosticValue。）"
+    )
+    peri_body, _peri_all, _peri_kept = _reduce_snowball_lines(
+        peri_lines, HUMANOID_EVIDENCE_MAX_CHARS
+    )
+    peri_section = (
+        f"-- monitor 节点 PeripheralMonitor 电源数据（共 {peri_total} 条，bat_vol/battery/电流）--\n{peri_body}"
+        if peri_lines
+        else "-- monitor 节点 PeripheralMonitor 电源数据 --\n（未提取到 PeripheralMonitor 数据。）"
+    )
+
+    return (
+        f"\n\n{HUMANOID_ANALYSIS_MARKER}\n"
+        "本日志主节点为 mission_engine（人形机器），按人形分析流程提供以下证据。\n\n"
+        f"【开局 · E/W 节点集中度（重点关注列表，阈值 E+W≥3）】\n{focus_text}\n\n"
+        f"{safety_section}\n\n"
+        f"{ew_section}\n\n"
+        f"{diag_section}\n\n"
+        f"{peri_section}"
+    )
+
+
 def _extract_ethercat_diagnostic_lines(file_path):
     """Stream the full file and retain only EtherCAT lines needed for root-cause rules."""
     lines = []
@@ -4279,11 +4496,28 @@ def prepare_log_analysis_source(path, extracted=None):
         else ""
     )
     ecm_anomaly, ecm_evidence = detect_ecm_anomaly(snowball_lines)
-    ecm_note = (
-        "；已检测到 EtherCAT 主站(ECM)异常，附 ethercat 节点日志与判断依据做深度分析"
-        if ecm_anomaly
-        else ""
-    )
+    humanoid = is_humanoid_node(primary_node)
+    humanoid_evidence = None
+    humanoid_safety = False
+    if humanoid:
+        humanoid_evidence = extract_humanoid_evidence(file_path)
+        humanoid_safety = bool(humanoid_evidence.get("has_safety_anomaly"))
+    # 人形：monitor 节点 EthercatMonitor 安全异常也触发主站下钻（步骤二）。
+    deep_analysis = ecm_anomaly or humanoid_safety
+    if humanoid:
+        if humanoid_safety:
+            ecm_note = (
+                "；monitor 节点检测到 EthercatMonitor 安全异常，"
+                "附人形专项证据并按主站 skill 下钻 ethercat 节点做深度分析"
+            )
+        else:
+            ecm_note = "；monitor 节点无 EthercatMonitor 安全异常，附人形专项证据做状态分析"
+    else:
+        ecm_note = (
+            "；已检测到 EtherCAT 主站(ECM)异常，附 ethercat 节点日志与判断依据做深度分析"
+            if ecm_anomaly
+            else ""
+        )
     header = (
         f"日志文件：{file_path.name}（约 {size_mb:.1f}MB）\n"
         f"分析节点：{primary_node}（仅分析该节点打印内容）\n"
@@ -4291,7 +4525,9 @@ def prepare_log_analysis_source(path, extracted=None):
         f"压缩去重后用于分析的行数：约 {kept}（连续重复的刷屏日志已折叠计数）{ecm_note}。"
     )
     source = f"{header}\n\n{body}"
-    if ecm_anomaly:
+    if humanoid and humanoid_evidence is not None:
+        source += build_humanoid_analysis_block(humanoid_evidence)
+    if deep_analysis:
         source += build_ecm_deep_analysis_block(
             file_path,
             ecm_evidence,
