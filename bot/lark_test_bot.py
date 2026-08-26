@@ -216,9 +216,24 @@ HUMANOID_PERIPHERAL_MONITOR_TOKEN = "peripheralmonitor"
 LOG_LEVEL_EW_RE = re.compile(r"\s([EW])/([A-Za-z0-9_]+)\(")
 # 人形专项证据区块标记（build_prompt 据此追加人形分析流程小节）。
 HUMANOID_ANALYSIS_MARKER = "【人形机器专项分析证据】"
-# 人形各证据块喂给模型的字符预算，封顶 token。
+# 人形各证据块喂给模型的字符预算，封顶 token。DiagnosticValue 是状态分析核心，预算最大；
+# 全局 E/W 只保留“重点关注节点”（E+W≥阈值）的原文，其余仅计数摘要，避免零星告警浪费 token；
+# PeripheralMonitor 电源数据周期性重复，预算最小。
 HUMANOID_EVIDENCE_MAX_CHARS = int(
-    os.environ.get("LARK_TEST_BOT_HUMANOID_EVIDENCE_MAX_CHARS", "18000")
+    os.environ.get("LARK_TEST_BOT_HUMANOID_EVIDENCE_MAX_CHARS", "12000")
+)
+HUMANOID_EW_MAX_CHARS = int(
+    os.environ.get("LARK_TEST_BOT_HUMANOID_EW_MAX_CHARS", "8000")
+)
+HUMANOID_PERIPHERAL_MAX_CHARS = int(
+    os.environ.get("LARK_TEST_BOT_HUMANOID_PERIPHERAL_MAX_CHARS", "6000")
+)
+HUMANOID_SAFETY_MAX_CHARS = int(
+    os.environ.get("LARK_TEST_BOT_HUMANOID_SAFETY_MAX_CHARS", "6000")
+)
+# 判定“重点关注节点”的 E+W 合计阈值（达到才把该节点 E/W 原文附给模型深入）。
+HUMANOID_EW_FOCUS_THRESHOLD = int(
+    os.environ.get("LARK_TEST_BOT_HUMANOID_EW_FOCUS_THRESHOLD", "3")
 )
 # 每类人形证据保留的最大命中行数（保头尾骨架，封顶内存）。
 HUMANOID_EVIDENCE_MAX_MATCH_LINES = int(
@@ -4176,26 +4191,34 @@ def build_humanoid_analysis_block(extracted_humanoid):
     peri_lines, peri_total, _p_trunc = extracted_humanoid["peripheral"]
     ew_node_counts = extracted_humanoid.get("ew_node_counts", {})
 
-    # 重点关注列表：同一节点 E/W 合计 ≥3 条。
+    # 重点关注列表：同一节点 E/W 合计 ≥ 阈值。
     focus = sorted(
         (
             (node, c["E"], c["W"])
             for node, c in ew_node_counts.items()
-            if (c["E"] + c["W"]) >= 3
+            if (c["E"] + c["W"]) >= HUMANOID_EW_FOCUS_THRESHOLD
         ),
         key=lambda item: (item[1] + item[2]),
         reverse=True,
     )
+    focus_nodes = {node for node, _e, _w in focus}
     if focus:
         focus_text = "\n".join(
             f"  · {node}：E={e} 条 / W={w} 条" for node, e, w in focus[:20]
         )
     else:
-        focus_text = "  · （无节点达到集中出现阈值，仅零星 E/W）"
+        focus_text = "  · （无节点达到集中出现阈值，仅零星 E/W，按流程只记录不深入）"
+    # 非重点节点的零星 E/W 只在计数里体现，不附原文，省 token。
+    scattered = [
+        f"  · {node}：E={c['E']} 条 / W={c['W']} 条"
+        for node, c in sorted(ew_node_counts.items())
+        if node not in focus_nodes
+    ]
+    scattered_text = "\n".join(scattered[:20]) if scattered else "  · （无）"
 
     if extracted_humanoid.get("has_safety_anomaly"):
         safety_body, _all, _kept = _reduce_snowball_lines(
-            safety_lines, HUMANOID_EVIDENCE_MAX_CHARS
+            safety_lines, HUMANOID_SAFETY_MAX_CHARS
         )
         safety_section = (
             f"-- monitor 节点 EthercatMonitor 安全异常事件（共 {safety_total} 条，"
@@ -4210,14 +4233,26 @@ def build_humanoid_analysis_block(extracted_humanoid):
             f"{reset_note}，判为**无 ethercat 安全异常**，跳过主站下钻，直接做状态分析。"
         )
 
-    ew_body, _ew_all, _ew_kept = _reduce_snowball_lines(
-        ew_lines, HUMANOID_EVIDENCE_MAX_CHARS
+    # 全局 E/W 原文只保留重点关注节点的行；非重点节点零星告警仅计数，不附原文。
+    focus_lines = (
+        [ln for ln in ew_lines if _ew_line_node(ln) in focus_nodes]
+        if focus_nodes
+        else []
     )
-    ew_section = (
-        f"-- 全局 E/W 级别日志（共 {ew_total} 条，节点计数见上）--\n{ew_body}"
-        if ew_lines
-        else "-- 全局 E/W 级别日志 --\n（未发现 E/W 级别日志。）"
-    )
+    if focus_lines:
+        ew_body, _ew_all, _ew_kept = _reduce_snowball_lines(
+            focus_lines, HUMANOID_EW_MAX_CHARS
+        )
+        ew_section = (
+            f"-- 重点关注节点 E/W 原文（全局共 {ew_total} 条，仅附集中出现节点的行）--\n{ew_body}"
+            f"\n散点 E/W 计数（未达集中阈值，只记录不深入）：\n{scattered_text}"
+        )
+    else:
+        ew_section = (
+            f"-- E/W 级别日志 --\n（全局共 {ew_total} 条，无节点达到集中阈值，"
+            "按流程只记录不深入，原文从略；散点计数见下。）\n"
+            f"散点 E/W 计数：\n{scattered_text}"
+        )
     diag_body, _diag_all, _diag_kept = _reduce_snowball_lines(
         diag_lines, HUMANOID_EVIDENCE_MAX_CHARS
     )
@@ -4229,7 +4264,7 @@ def build_humanoid_analysis_block(extracted_humanoid):
         else "-- DiagnosticValue 状态行 --\n（未提取到 DiagnosticValue。）"
     )
     peri_body, _peri_all, _peri_kept = _reduce_snowball_lines(
-        peri_lines, HUMANOID_EVIDENCE_MAX_CHARS
+        peri_lines, HUMANOID_PERIPHERAL_MAX_CHARS
     )
     peri_section = (
         f"-- monitor 节点 PeripheralMonitor 电源数据（共 {peri_total} 条，bat_vol/battery/电流）--\n{peri_body}"
@@ -4240,12 +4275,18 @@ def build_humanoid_analysis_block(extracted_humanoid):
     return (
         f"\n\n{HUMANOID_ANALYSIS_MARKER}\n"
         "本日志主节点为 mission_engine（人形机器），按人形分析流程提供以下证据。\n\n"
-        f"【开局 · E/W 节点集中度（重点关注列表，阈值 E+W≥3）】\n{focus_text}\n\n"
+        f"【开局 · E/W 节点集中度（重点关注列表，阈值 E+W≥{HUMANOID_EW_FOCUS_THRESHOLD}）】\n{focus_text}\n\n"
         f"{safety_section}\n\n"
         f"{ew_section}\n\n"
         f"{diag_section}\n\n"
         f"{peri_section}"
     )
+
+
+def _ew_line_node(line):
+    """从 E/W 日志行解析出发信节点名（小写），无法解析返回空串。"""
+    mo = LOG_LEVEL_EW_RE.search(line or "")
+    return mo.group(2).lower() if mo else ""
 
 
 def _extract_ethercat_diagnostic_lines(file_path):

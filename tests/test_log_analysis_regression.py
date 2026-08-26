@@ -334,6 +334,29 @@ class HumanoidWorkflowTests(unittest.TestCase):
         self.assertGreaterEqual(counts.get("ethercat", {}).get("E", 0), 2)
         self.assertTrue(extracted["has_safety_anomaly"])
 
+    def test_scattered_ew_lines_excluded_from_raw_dump(self):
+        # 一个集中出现节点（busnode 4 条 E/W ≥ 阈值）+ 两个零星节点（各 1 条）。
+        lines = ["2026-08-08 11:00:00.100 I/mission_engine(m)(1/1): SN:HU_D04A001"]
+        for i in range(4):
+            lines.append(
+                f"2026-08-08 11:00:0{i}.000 E/busnode(m)(3/3): busnode fault detail {i}"
+            )
+        lines.append("2026-08-08 11:00:05.000 W/loner_a(m)(4/4): scattered warn AAA")
+        lines.append("2026-08-08 11:00:06.000 W/loner_b(m)(5/5): scattered warn BBB")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "humanoid.log.active"
+            path.write_text("\n".join(lines), encoding="utf-8")
+            extracted = bot.extract_humanoid_evidence(path)
+        block = bot.build_humanoid_analysis_block(extracted)
+        # 重点节点原文保留。
+        self.assertIn("busnode fault detail", block)
+        # 零星节点原文不进 dump，避免浪费 token。
+        self.assertNotIn("scattered warn AAA", block)
+        self.assertNotIn("scattered warn BBB", block)
+        # 零星节点仍以计数形式体现。
+        self.assertIn("loner_a", block)
+        self.assertIn("loner_b", block)
+
     def test_tron_snowball_log_has_no_humanoid_block(self):
         log = "\n".join(
             [
