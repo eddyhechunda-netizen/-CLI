@@ -4543,18 +4543,46 @@ def render_normal_log_analysis(source):
     return "**✅ 结论：这是一个正常日志，无 EtherCAT 通信异常或电机故障。**"
 
 
+def humanoid_safety_window(safety_lines):
+    """根据人形 monitor 节点 EthercatMonitor「安全异常」事件时间计算 ethercat 证据时间窗。
+
+    人形的主站异常由 monitor 节点报出（非主节点 mission_engine 的 ecm 信号），因此不能用
+    ecm_event_window（它只识别主节点 ecm err/exit）。这里用安全事件的最早/最晚时间戳向前后各
+    扩窗，得到与 TRON ecm_event_window 对齐的 (start, end)，用于把 ethercat 证据裁到异常时段。
+    """
+    event_times = [t for t in (parse_log_time(ln) for ln in safety_lines) if t]
+    if not event_times:
+        return None, None
+    start = min(event_times) - timedelta(
+        seconds=LOG_ANALYSIS_ETHERCAT_WINDOW_BEFORE_SECONDS
+    )
+    end = max(event_times) + timedelta(
+        seconds=LOG_ANALYSIS_ETHERCAT_WINDOW_AFTER_SECONDS
+    )
+    return start, end
+
+
 def build_ecm_deep_analysis_block(
     file_path,
     evidence,
     snowball_lines,
     extracted=None,
+    window=None,
 ):
-    """构造 EtherCAT 主站异常深度分析区块，只附加日志证据。"""
+    """构造 EtherCAT 主站异常深度分析区块，只附加日志证据。
+
+    window：可选 (start, end) 时间窗覆盖。人形机器由 monitor 节点报安全异常，主节点无 ecm 信号，
+    需由调用方传入基于 EthercatMonitor 安全事件计算的时间窗（humanoid_safety_window），否则
+    ecm_event_window 会返回空而退回全量头尾。
+    """
     extracted = extracted or extract_log_evidence(file_path)
     ec_lines, ec_total, ec_truncated = extracted["ethercat"]
-    window_start, window_end, _first_event_time, _recovery_time = ecm_event_window(
-        snowball_lines
-    )
+    if window and window[0] and window[1]:
+        window_start, window_end = window
+    else:
+        window_start, window_end, _first_event_time, _recovery_time = ecm_event_window(
+            snowball_lines
+        )
     windowed_lines = filter_lines_by_window(ec_lines, window_start, window_end)
     if not windowed_lines and ec_lines:
         windowed_lines = ec_lines
@@ -4669,11 +4697,15 @@ def prepare_log_analysis_source(path, extracted=None):
     if humanoid and humanoid_evidence is not None:
         source += build_humanoid_analysis_block(humanoid_evidence)
     if deep_analysis:
+        deep_window = None
+        if humanoid_safety and humanoid_evidence is not None:
+            deep_window = humanoid_safety_window(humanoid_evidence["safety"][0])
         source += build_ecm_deep_analysis_block(
             file_path,
             ecm_evidence,
             snowball_lines,
             extracted=extracted,
+            window=deep_window,
         )
     return source
 

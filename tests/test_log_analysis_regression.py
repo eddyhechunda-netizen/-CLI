@@ -325,9 +325,39 @@ class HumanoidWorkflowTests(unittest.TestCase):
         self.assertIn("DiagnosticValue", source)
         self.assertIn("PeripheralMonitor", source)
 
-    def test_ew_focus_list_flags_concentrated_node(self):
+    def test_humanoid_ethercat_evidence_windowed_to_safety_time(self):
+        # 主节点 mission_engine 无 ecm 信号；ethercat 异常应按 monitor 安全事件时间开窗，
+        # 窗外的 ethercat 噪声不应进入主站深度分析区块。
+        lines = ["2026-08-08 10:00:00.000 I/mission_engine(m)(1/1): SN:HU_D04A001 state:ST_IDLE"]
+        # 窗外早期 ethercat 噪声（应被裁掉）。
+        lines.append(
+            "2026-08-08 10:00:05.000 I/ethercat(mroslaunch)(6/6): EcApplication.cpp(1) OUTOFWINDOW_EARLY marker"
+        )
+        # 安全事件在 11:00:00 附近。
+        lines.append(
+            "2026-08-08 11:00:00.000 I/monitor(mroslaunch)(2/2): ethercat_monitor.cpp(75) EthercatMonitor: add ethercatCommunicationFatal to motor 15 MOTOR_LOST triggered DAMPING"
+        )
+        # 窗内 ethercat 关键异常（应保留）。
+        lines.append(
+            "2026-08-08 11:00:01.000 I/ethercat(mroslaunch)(6/6): EcDriver.cpp(1633) slave = 1, link_status = 0x0, ret = -3 INWINDOW marker"
+        )
+        # 窗外晚期 ethercat 噪声（应被裁掉）。
+        lines.append(
+            "2026-08-08 12:00:00.000 I/ethercat(mroslaunch)(6/6): EcApplication.cpp(1) OUTOFWINDOW_LATE marker"
+        )
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "humanoid.log.active"
+            path.write_text("\n".join(lines), encoding="utf-8")
+            source = bot.prepare_log_analysis_source(path)
+        self.assertIn(bot.ECM_DEEP_ANALYSIS_MARKER, source)
+        ecm_block = source[source.find(bot.ECM_DEEP_ANALYSIS_MARKER):]
+        self.assertIn("INWINDOW marker", ecm_block)
+        self.assertNotIn("OUTOFWINDOW_EARLY", ecm_block)
+        self.assertNotIn("OUTOFWINDOW_LATE", ecm_block)
+
+    def test_ew_focus_list_flags_concentrated_node(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "hum2.log.active"
             path.write_text(self.SAFETY_LOG, encoding="utf-8")
             extracted = bot.extract_humanoid_evidence(path)
         counts = extracted["ew_node_counts"]

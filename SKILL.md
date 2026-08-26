@@ -85,6 +85,8 @@ xlsx""根据需求生成测试报告""读取这个飞书需求，生成后放到
    > 节点仅以计数形式给出（不附原文），你按「只记录不深入」处理即可。
 2. **有 ethercat 安全异常时**：按上文常规 ECM 主站流程分析（读知识库、状态字/link_status/
    lost link 计数、按 HU_D04 用 2.4 拓扑表换算 slave、按「三·人形」查驱动故障码）。
+   > 人形主站异常由 monitor 节点 EthercatMonitor 报出（主节点 mission_engine 无 ecm 信号），
+   > 服务已按**安全事件时间戳 ±30s 开窗**裁取 ethercat 节点证据，你据窗内证据下钻即可。
 3. **状态分析（任何人形日志都执行）**：提取 DiagnosticValue 按 name 分类——`ability/*`=能力
    加载(OK/ERROR/WARN 名单)、`ability_running`=当前运行能力时间线、`version/ecm_version/
    motor_version`=版本、`imu/ethercat/navigation/audio_device`=硬件健康、`internet_online/
