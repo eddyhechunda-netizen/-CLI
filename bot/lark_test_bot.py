@@ -4957,8 +4957,6 @@ def run_copilot(job, job_dir, heartbeat=None):
                 raise JobCancelled("任务已由用户取消。")
             args = [
                 COPILOT_BIN,
-                "-p",
-                current_prompt,
                 "-C",
                 str(job_dir),
                 "--allow-all-tools",
@@ -4983,13 +4981,23 @@ def run_copilot(job, job_dir, heartbeat=None):
                 args.extend(["--session-id", copilot_session_id])
             else:
                 args.append(f"--resume={copilot_session_id}")
-            process = subprocess.Popen(
-                args,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                start_new_session=True,
-            )
+            # 通过 stdin 传入 prompt，避免超长日志分析 prompt 触发命令行参数长度上限
+            # （[Errno 7] Argument list too long）。copilot 在未使用 -p 且 stdin 有输入时
+            # 会把 stdin 全文作为初始 prompt。
+            prompt_path = Path(job_dir) / ".copilot_prompt.txt"
+            prompt_path.write_text(current_prompt, encoding="utf-8")
+            prompt_stdin = prompt_path.open("r", encoding="utf-8")
+            try:
+                process = subprocess.Popen(
+                    args,
+                    stdin=prompt_stdin,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    start_new_session=True,
+                )
+            finally:
+                prompt_stdin.close()
             with ACTIVE_LOCK:
                 ACTIVE_PROCESSES[job["job_id"]] = process
             deadline = time.monotonic() + timeout
@@ -5055,6 +5063,10 @@ def run_copilot(job, job_dir, heartbeat=None):
         finish_ai_usage(job["job_id"], usage_status)
         with ACTIVE_LOCK:
             ACTIVE_PROCESSES.pop(job["job_id"], None)
+        try:
+            (Path(job_dir) / ".copilot_prompt.txt").unlink()
+        except OSError:
+            pass
 
 
 def enqueue_job(job_id, action):

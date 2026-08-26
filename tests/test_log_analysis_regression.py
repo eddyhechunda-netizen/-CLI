@@ -356,10 +356,17 @@ class CorrectionLoopRegressionTests(unittest.TestCase):
 
     def test_revision_reuses_session_and_sends_only_gate_error(self):
         calls = []
+        prompts = []
         answers = iter(["incomplete answer", "corrected answer"])
 
         def fake_popen(args, **kwargs):
             calls.append(args)
+            stdin = kwargs.get("stdin")
+            if stdin is not None:
+                stdin.seek(0)
+                prompts.append(stdin.read())
+            else:
+                prompts.append("")
             return self.FakeProcess(next(answers))
 
         def fake_validate(_source, answer):
@@ -387,18 +394,21 @@ class CorrectionLoopRegressionTests(unittest.TestCase):
             patch.object(bot.subprocess, "Popen", side_effect=fake_popen),
             patch.object(bot, "LOG_ANALYSIS_MAX_REVISIONS", 2),
         )
-        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], \
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], \
                 patches[6], patches[7], patches[8], patches[9], patches[10]:
             result = bot.run_copilot(
                 {"job_id": "job-test", "action": "log_analysis", "source": "x"},
-                bot.ROOT,
+                tmpdir,
             )
 
         self.assertEqual("corrected answer", result)
         self.assertEqual(2, len(calls))
         session_id = calls[0][calls[0].index("--session-id") + 1]
         self.assertIn(f"--resume={session_id}", calls[1])
-        revision_prompt = calls[1][calls[1].index("-p") + 1]
+        # prompt 现在通过 stdin 传入（绕过命令行参数长度上限），不再使用 -p。
+        self.assertNotIn("-p", calls[1])
+        revision_prompt = prompts[1]
         self.assertIn("missing motor9", revision_prompt)
         self.assertNotIn("FULL ORIGINAL PROMPT", revision_prompt)
         self.assertNotIn("incomplete answer", revision_prompt)
