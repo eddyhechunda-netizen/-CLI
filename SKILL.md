@@ -91,6 +91,9 @@ xlsx""根据需求生成测试报告""读取这个飞书需求，生成后放到
    wifi_*/lan_index`=网络、`Robot_State_Detection/Fall_Detection/ControllerState`=运动姿态；
    再看 PeripheralMonitor：bat_vol/battery 平稳下降为正常电池消耗，一分钟内电压骤降 >2V 或
    电流突增 >50% 标记**电源异常**并关联当时运行能力。
+   > 为省 token，服务已对状态证据做**语义压缩**：DiagnosticValue 按 name 折叠为「首次+每次
+   > 变化」的时间线（末次即最新值）；PeripheralMonitor 按每分钟降采样并保留首末，异常点以
+   > `⚠电源异常` 前缀直接标出。你据此读时间线/曲线即可，不必再自行去重。
 
 ## 产出长什么样
 

@@ -212,6 +212,18 @@ HUMANOID_ECAT_ACTION_RE = re.compile(r"HALF_STAND|DAMPING", re.IGNORECASE)
 # 人形状态分析证据：DiagnosticValue 行、PeripheralMonitor 电源行。
 HUMANOID_DIAGNOSTIC_VALUE_TOKEN = "diagnosticvalue"
 HUMANOID_PERIPHERAL_MONITOR_TOKEN = "peripheralmonitor"
+# DiagnosticValue 行的 name 字段（用于按 name 做“变化点”压缩，只留状态变化的行）。
+HUMANOID_DIAG_NAME_RE = re.compile(r"\bname:(\S+)", re.IGNORECASE)
+# PeripheralMonitor 电源字段（电压/电流），用于降采样与电源异常判定。
+HUMANOID_PERI_BATVOL_RE = re.compile(r"bat_vol[:=]\s*([\d.]+)", re.IGNORECASE)
+HUMANOID_PERI_CURRENT_RE = re.compile(r"\bcurrent[:=]\s*([\d.]+)", re.IGNORECASE)
+# 电源异常阈值：相邻采样电压骤降 > N 伏，或电流突增 > 比例。
+HUMANOID_PERI_VOLT_DROP_V = float(
+    os.environ.get("LARK_TEST_BOT_HUMANOID_PERI_VOLT_DROP_V", "2.0")
+)
+HUMANOID_PERI_CURRENT_SPIKE_RATIO = float(
+    os.environ.get("LARK_TEST_BOT_HUMANOID_PERI_CURRENT_SPIKE_RATIO", "1.5")
+)
 # E/ 与 W/ 级别日志行（logcat 风格：时间戳后紧跟 级别/节点(...)）。
 LOG_LEVEL_EW_RE = re.compile(r"\s([EW])/([A-Za-z0-9_]+)\(")
 # 人形专项证据区块标记（build_prompt 据此追加人形分析流程小节）。
@@ -4182,6 +4194,74 @@ def extract_humanoid_evidence(file_path, heartbeat=None):
     return result
 
 
+def _compress_diagnostic_lines(lines):
+    """DiagnosticValue 按 name 做“变化点”压缩。
+
+    DiagnosticValue 每个周期都会把全部 name 重打一遍，绝大多数值不变（如 imu level:OK 刷屏）。
+    用户流程真正需要的是「随时间的变化 / 能力切换时间线 / 取最新值」，而非每一条。策略：按
+    name 分组，只保留每个 name 的首次出现及其值发生变化的行——这样天然得到状态变化时间线，
+    且最后一次变化即当前最新值。无 name 的行原样保留。返回 (kept_lines, name_count)。
+    """
+    kept = []
+    last_value = {}
+    for line in lines:
+        mo = HUMANOID_DIAG_NAME_RE.search(line)
+        if not mo:
+            kept.append(line)
+            continue
+        name = mo.group(1).lower()
+        value = line[mo.end():].strip()
+        if last_value.get(name) != value:
+            kept.append(line)
+            last_value[name] = value
+    return kept, len(last_value)
+
+
+def _compress_peripheral_lines(lines):
+    """PeripheralMonitor 电源数据降采样 + 异常点保留。
+
+    电源数据是高频周期采样（电压/电流每秒都在微变，无法靠去重折叠）。用户只需要「电池消耗
+    曲线」+ 标注「一分钟内电压骤降 >2V 或电流突增 >50%」的电源异常点。策略：每分钟保留一条
+    代表采样，另外强制保留首、末及所有异常点（异常行加 ⚠电源异常 前缀，便于模型直接引用）。
+    返回 (kept_lines, anomaly_count)。
+    """
+    kept = []
+    last_minute = None
+    prev_vol = None
+    prev_cur = None
+    anomalies = 0
+    n = len(lines)
+    for idx, line in enumerate(lines):
+        ts = parse_log_time(line)
+        vmo = HUMANOID_PERI_BATVOL_RE.search(line)
+        cmo = HUMANOID_PERI_CURRENT_RE.search(line)
+        vol = float(vmo.group(1)) if vmo else None
+        cur = float(cmo.group(1)) if cmo else None
+        anomaly = False
+        if vol is not None and prev_vol is not None and (prev_vol - vol) > HUMANOID_PERI_VOLT_DROP_V:
+            anomaly = True
+        if (
+            cur is not None
+            and prev_cur is not None
+            and prev_cur > 0
+            and cur > prev_cur * HUMANOID_PERI_CURRENT_SPIKE_RATIO
+        ):
+            anomaly = True
+        minute = ts.strftime("%Y-%m-%d %H:%M") if ts else None
+        new_minute = minute is not None and minute != last_minute
+        if idx == 0 or idx == n - 1 or new_minute or anomaly:
+            kept.append(f"  ⚠电源异常→ {line}" if anomaly else line)
+            if minute is not None:
+                last_minute = minute
+        if anomaly:
+            anomalies += 1
+        if vol is not None:
+            prev_vol = vol
+        if cur is not None:
+            prev_cur = cur
+    return kept, anomalies
+
+
 def build_humanoid_analysis_block(extracted_humanoid):
     """构造人形专项分析证据区块（开局证据 + 状态分析证据），附 HUMANOID_ANALYSIS_MARKER。"""
     safety_lines, safety_total, _s_trunc = extracted_humanoid["safety"]
@@ -4253,21 +4333,31 @@ def build_humanoid_analysis_block(extracted_humanoid):
             "按流程只记录不深入，原文从略；散点计数见下。）\n"
             f"散点 E/W 计数：\n{scattered_text}"
         )
+    diag_compressed, diag_name_count = _compress_diagnostic_lines(diag_lines)
     diag_body, _diag_all, _diag_kept = _reduce_snowball_lines(
-        diag_lines, HUMANOID_EVIDENCE_MAX_CHARS
+        diag_compressed, HUMANOID_EVIDENCE_MAX_CHARS
     )
     diag_section = (
-        f"-- DiagnosticValue 状态行（共 {diag_total} 条，按 name 分类：ability*/"
-        "ability_running/version*/imu·ethercat·navigation·audio_device/internet·wifi·lan/"
+        f"-- DiagnosticValue 状态变化时间线（原始 {diag_total} 条，涉及 {diag_name_count} 个 name，"
+        "已按 name 折叠为“首次+每次变化”，末次即最新值；分类：ability*/ability_running/version*/"
+        "imu·ethercat·navigation·audio_device/internet·wifi·lan/"
         f"Robot_State_Detection·Fall_Detection·ControllerState）--\n{diag_body}"
         if diag_lines
         else "-- DiagnosticValue 状态行 --\n（未提取到 DiagnosticValue。）"
     )
+    peri_compressed, peri_anomalies = _compress_peripheral_lines(peri_lines)
     peri_body, _peri_all, _peri_kept = _reduce_snowball_lines(
-        peri_lines, HUMANOID_PERIPHERAL_MAX_CHARS
+        peri_compressed, HUMANOID_PERIPHERAL_MAX_CHARS
+    )
+    peri_note = (
+        f"，已标注 {peri_anomalies} 个电源异常点（电压骤降>{HUMANOID_PERI_VOLT_DROP_V:g}V 或电流突增>"
+        f"{(HUMANOID_PERI_CURRENT_SPIKE_RATIO - 1) * 100:.0f}%）"
+        if peri_anomalies
+        else "，未见电源异常点"
     )
     peri_section = (
-        f"-- monitor 节点 PeripheralMonitor 电源数据（共 {peri_total} 条，bat_vol/battery/电流）--\n{peri_body}"
+        f"-- monitor 节点 PeripheralMonitor 电源曲线（原始 {peri_total} 条，已按每分钟降采样并保留首末"
+        f"{peri_note}；bat_vol/battery/current）--\n{peri_body}"
         if peri_lines
         else "-- monitor 节点 PeripheralMonitor 电源数据 --\n（未提取到 PeripheralMonitor 数据。）"
     )

@@ -357,6 +357,47 @@ class HumanoidWorkflowTests(unittest.TestCase):
         self.assertIn("loner_a", block)
         self.assertIn("loner_b", block)
 
+    def test_diagnostic_value_change_point_compression(self):
+        # imu 每周期重复 OK（应折叠为 1 条）；ability_running 发生 stand→walk 变化（应各留）。
+        lines = ["2026-08-08 11:00:00.100 I/mission_engine(m)(1/1): SN:HU_D04A001"]
+        for i in range(6):
+            lines.append(
+                f"2026-08-08 11:00:0{i}.000 I/monitor(m)(2/2): DiagnosticValue name:imu level:OK"
+            )
+        lines.append(
+            "2026-08-08 11:00:00.500 I/monitor(m)(2/2): DiagnosticValue name:ability_running message:stand"
+        )
+        lines.append(
+            "2026-08-08 11:00:05.500 I/monitor(m)(2/2): DiagnosticValue name:ability_running message:walk"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "humanoid.log.active"
+            path.write_text("\n".join(lines), encoding="utf-8")
+            extracted = bot.extract_humanoid_evidence(path)
+        kept, name_count = bot._compress_diagnostic_lines(extracted["diagnostic"][0])
+        imu_lines = [ln for ln in kept if "name:imu" in ln]
+        run_lines = [ln for ln in kept if "ability_running" in ln]
+        self.assertEqual(len(imu_lines), 1)  # 6 条重复折叠为 1
+        self.assertEqual(len(run_lines), 2)  # stand / walk 两次变化都保留
+        self.assertEqual(name_count, 2)
+
+    def test_peripheral_downsample_flags_voltage_drop(self):
+        lines = ["2026-08-08 11:00:00.100 I/mission_engine(m)(1/1): SN:HU_D04A001"]
+        lines.append(
+            "2026-08-08 11:00:00.000 I/monitor(m)(2/2): PeripheralMonitor bat_vol:48.0 battery:80 current:5.0"
+        )
+        # 骤降 >2V，应标记电源异常。
+        lines.append(
+            "2026-08-08 11:00:01.000 I/monitor(m)(2/2): PeripheralMonitor bat_vol:45.0 battery:78 current:5.0"
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "humanoid.log.active"
+            path.write_text("\n".join(lines), encoding="utf-8")
+            extracted = bot.extract_humanoid_evidence(path)
+        kept, anomalies = bot._compress_peripheral_lines(extracted["peripheral"][0])
+        self.assertEqual(anomalies, 1)
+        self.assertTrue(any("⚠电源异常" in ln for ln in kept))
+
     def test_tron_snowball_log_has_no_humanoid_block(self):
         log = "\n".join(
             [
