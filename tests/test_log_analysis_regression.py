@@ -238,7 +238,7 @@ class HumanoidNodeSupportTests(unittest.TestCase):
     def test_mission_node_detected_as_primary_for_humanoid(self):
         log = "\n".join(
             [
-                "2026-08-08 11:00:00.100 I/mission_engine(mroslaunch)(1/1): state:ST_IDLE SN:HU2A001",
+                "2026-08-08 11:00:00.100 I/mission_engine(mroslaunch)(1/1): state:ST_IDLE SN:HU_D04A001",
                 "2026-08-08 11:00:00.200 E/mission_engine(mroslaunch)(1/1): >>>>>|ecm err|",
                 "2026-08-08 11:00:00.300 I/mission_engine(mroslaunch)(1/1): ethercat ok!",
             ]

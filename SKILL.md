@@ -43,7 +43,7 @@ xlsx""根据需求生成测试报告""读取这个飞书需求，生成后放到
 错误码或历史样本的固定结论：
 
 1. 先从机器状态主节点还原异常发生、主站退出、重启和恢复时间线（TRON2 系列为 snowball，
-   人形机器（SN 以 HU 开头）为 mission_engine，二者等价）；只有确认 ECM 异常后
+   人形机器（SN 以 HU_D04 开头）为 mission_engine，二者等价）；只有确认 ECM 异常后
    才进入 EtherCAT 深度分析。
 2. ECM 异常必须读取 `references/ethercat_master_diagnosis.md`，并只使用 ethercat
    节点证据定位根因。
@@ -348,7 +348,7 @@ docx 需求另需 `python-docx`。
 - `references/report_schema.md` — 测试报告 JSON 输入格式
 - `references/quality_review_schema.md` — 需求质量检查数据格式
 - `references/execution_workflow.md` — 执行结果、缺陷和追踪矩阵生成流程
-- `references/ethercat_master_diagnosis.md` — **EtherCAT 主站(ECM)异常诊断依据**：日志分析判定主站异常后，只分析 ethercat 节点打印，按本文件的定位方法（状态字/link_status/lost link cnt）、按机器形态（SN 前缀 DACH 双臂 / SF 双足 / WF 轮足 / HU 人形）选用的网络拓扑与从站号对照表、以及驱动故障码保护规则给唯一根因（依据飞书 wiki 沉淀）；若某形态暂无拓扑对照表，只依据日志直接出现的 slave/端口证据定位，禁止套用其他形态的表
+- `references/ethercat_master_diagnosis.md` — **EtherCAT 主站(ECM)异常诊断依据**：日志分析判定主站异常后，只分析 ethercat 节点打印，按本文件的定位方法（状态字/link_status/lost link cnt）、按机器形态（SN 前缀 DACH 双臂 / SF 双足 / WF 轮足 / HU_D04 人形）选用的网络拓扑与从站号对照表、以及驱动故障码保护规则给唯一根因（依据飞书 wiki 沉淀）；若某形态暂无拓扑对照表，只依据日志直接出现的 slave/端口证据定位，禁止套用其他形态的表
 - `assets/example_cases.json` — JSON 范本
 - `assets/example_report.json` — 测试报告 JSON 范本
 - `assets/example_quality_review.json` — 需求质量检查范本
