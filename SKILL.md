@@ -54,6 +54,10 @@ xlsx""根据需求生成测试报告""读取这个飞书需求，生成后放到
    电机、配置、通信或供电错误证据时，才能采用“遥控器手动掉电/上电”模板。
 5. 按机器 SN 选择拓扑表，把 motor 映射到 slave；依次核对异常电机状态字、前一从站
    link_status 及 ret、`[88]/[8a]` 帧错误计数、`[8f]/[90]/[91]/[92]` lost link 计数。
+   电机驱动故障码（状态字非 0 / `错误代码是 0x%x`）也须按机型选表：TRON2 系列
+   （snowball，DACH/SF/WF）查「三、Tron2 电机驱动故障保护机制说明」，人形机器
+   （mission_engine，HU_D04）查「三·人形 人形电机驱动故障保护机制说明」，二者故障码
+   含义不同（如 0xFF01、0x4400），切勿混用。
 6. `link_status=0x5617` 不能脱离 ret、lost link 计数和后续恢复状态单独定性为硬件断线；
    lost link 全为 0 时只能写“无 lost-link 硬件断线证据”。若帧错误计数非零，不得写成
    “所有 EtherCAT 错误计数器均为 0”。
@@ -348,7 +352,7 @@ docx 需求另需 `python-docx`。
 - `references/report_schema.md` — 测试报告 JSON 输入格式
 - `references/quality_review_schema.md` — 需求质量检查数据格式
 - `references/execution_workflow.md` — 执行结果、缺陷和追踪矩阵生成流程
-- `references/ethercat_master_diagnosis.md` — **EtherCAT 主站(ECM)异常诊断依据**：日志分析判定主站异常后，只分析 ethercat 节点打印，按本文件的定位方法（状态字/link_status/lost link cnt）、按机器形态（SN 前缀 DACH 双臂 2.1 / SF 双足 2.2 / WF 轮足 2.3 / HU_D04 人形 2.4）选用的网络拓扑与从站号对照表、以及驱动故障码保护规则给唯一根因（依据飞书 wiki 沉淀）
+- `references/ethercat_master_diagnosis.md` — **EtherCAT 主站(ECM)异常诊断依据**：日志分析判定主站异常后，只分析 ethercat 节点打印，按本文件的定位方法（状态字/link_status/lost link cnt）、按机器形态（SN 前缀 DACH 双臂 2.1 / SF 双足 2.2 / WF 轮足 2.3 / HU_D04 人形 2.4）选用的网络拓扑与从站号对照表、以及按机型选用的驱动故障码保护规则（TRON2 系列查「三」、人形 HU_D04/mission_engine 查「三·人形」）给唯一根因（依据飞书 wiki 沉淀）
 - `assets/example_cases.json` — JSON 范本
 - `assets/example_report.json` — 测试报告 JSON 范本
 - `assets/example_quality_review.json` — 需求质量检查范本
