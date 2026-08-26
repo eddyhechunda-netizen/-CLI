@@ -234,6 +234,52 @@ class UnsupportedFeishuLinkTests(unittest.TestCase):
         )
 
 
+class HumanoidNodeSupportTests(unittest.TestCase):
+    def test_mission_node_detected_as_primary_for_humanoid(self):
+        log = "\n".join(
+            [
+                "2026-08-08 11:00:00.100 I/mission_engine(mroslaunch)(1/1): state:ST_IDLE SN:HU2A001",
+                "2026-08-08 11:00:00.200 E/mission_engine(mroslaunch)(1/1): >>>>>|ecm err|",
+                "2026-08-08 11:00:00.300 I/mission_engine(mroslaunch)(1/1): ethercat ok!",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "humanoid.log.active"
+            path.write_text(log, encoding="utf-8")
+            extracted = bot.extract_log_evidence(path)
+            source = bot.prepare_log_analysis_source(path)
+
+        self.assertEqual(extracted["primary_node"], "mission_engine")
+        self.assertEqual(len(extracted["snowball"][0]), 3)
+        self.assertIn("分析节点：mission_engine", source)
+
+    def test_snowball_node_still_detected_for_tron(self):
+        log = "\n".join(
+            [
+                "2026-08-08 11:00:00.100 I/snowball(mroslaunch)(1/1): state:ST_IDLE SN:SF_TRON2A",
+                "2026-08-08 11:00:00.200 I/snowball(mroslaunch)(1/1): ethercat ok!",
+            ]
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "tron.log.active"
+            path.write_text(log, encoding="utf-8")
+            extracted = bot.extract_log_evidence(path)
+            source = bot.prepare_log_analysis_source(path)
+
+        self.assertEqual(extracted["primary_node"], "snowball")
+        self.assertIn("分析节点：snowball", source)
+
+    def test_missing_primary_node_error_lists_both_nodes(self):
+        log = "2026-08-08 11:00:00.100 I/ethercat(mroslaunch)(1/1): Found 12 slaves."
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "noprimary.log.active"
+            path.write_text(log, encoding="utf-8")
+            with self.assertRaises(RuntimeError) as ctx:
+                bot.prepare_log_analysis_source(path)
+        self.assertIn("snowball", str(ctx.exception))
+        self.assertIn("mission_engine", str(ctx.exception))
+
+
 class CorrectionLoopRegressionTests(unittest.TestCase):
     class FakeProcess:
         def __init__(self, answer):
