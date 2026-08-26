@@ -213,7 +213,15 @@ HUMANOID_ECAT_ACTION_RE = re.compile(r"HALF_STAND|DAMPING", re.IGNORECASE)
 HUMANOID_DIAGNOSTIC_VALUE_TOKEN = "diagnosticvalue"
 HUMANOID_PERIPHERAL_MONITOR_TOKEN = "peripheralmonitor"
 # DiagnosticValue 行的 name 字段（用于按 name 做“变化点”压缩，只留状态变化的行）。
-HUMANOID_DIAG_NAME_RE = re.compile(r"\bname:(\S+)", re.IGNORECASE)
+# DiagnosticValue 行的 name 字段（用于按 name 做“变化点”压缩，只留状态变化的行）。
+# 真实格式：`DiagnosticValue - (name: <值>, part: , level: OK, code: 0, message: ...)`，
+# name 后可能有空格、逗号或右括号结尾。
+HUMANOID_DIAG_NAME_RE = re.compile(r"\bname:\s*([^,)]+)", re.IGNORECASE)
+# DiagnosticValue 的“值签名”字段（level/code/message），用于判定该 name 是否发生变化，
+# 忽略行内易变的时间戳/clk。
+HUMANOID_DIAG_VALUE_RE = re.compile(
+    r"(level:\s*[^,)]*|code:\s*[^,)]*|message:\s*[^)]*)", re.IGNORECASE
+)
 # PeripheralMonitor 电源字段（电压/电流），用于降采样与电源异常判定。
 HUMANOID_PERI_BATVOL_RE = re.compile(r"bat_vol[:=]\s*([\d.]+)", re.IGNORECASE)
 HUMANOID_PERI_CURRENT_RE = re.compile(r"\bcurrent[:=]\s*([\d.]+)", re.IGNORECASE)
@@ -4209,8 +4217,10 @@ def _compress_diagnostic_lines(lines):
         if not mo:
             kept.append(line)
             continue
-        name = mo.group(1).lower()
-        value = line[mo.end():].strip()
+        name = mo.group(1).strip().lower()
+        value = " ".join(m.group(0) for m in HUMANOID_DIAG_VALUE_RE.finditer(line)).strip()
+        if not value:
+            value = line[mo.end():].strip()
         if last_value.get(name) != value:
             kept.append(line)
             last_value[name] = value
