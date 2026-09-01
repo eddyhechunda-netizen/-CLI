@@ -507,6 +507,57 @@ class CorrectionLoopRegressionTests(unittest.TestCase):
         self.assertNotIn("FULL ORIGINAL PROMPT", revision_prompt)
         self.assertNotIn("incomplete answer", revision_prompt)
 
+    def test_resource_not_found_retries_with_fallback_model(self):
+        calls = []
+
+        class ModelProcess:
+            def __init__(self, returncode, stdout="", stderr=""):
+                self.returncode = returncode
+                self.stdout = stdout
+                self.stderr = stderr
+
+            def communicate(self, timeout=None):
+                return self.stdout, self.stderr
+
+        def fake_popen(args, **kwargs):
+            calls.append(list(args))
+            model = args[args.index("--model") + 1]
+            if model == "gpt-5.6-sol":
+                return ModelProcess(
+                    1,
+                    stderr=(
+                        "Execution failed: CAPIError: 400 "
+                        "The resource you requested was not found."
+                    ),
+                )
+            return ModelProcess(0, stdout="fallback answer")
+
+        patches = (
+            patch.object(bot, "start_ai_usage"),
+            patch.object(bot, "finish_ai_usage"),
+            patch.object(bot, "is_cancel_requested", return_value=False),
+            patch.object(bot, "build_prompt", return_value="prompt"),
+            patch.object(bot, "set_job_progress"),
+            patch.object(bot, "safe_update_job_card"),
+            patch.object(bot.subprocess, "Popen", side_effect=fake_popen),
+            patch.object(bot, "COPILOT_MODEL", "gpt-5.6-sol"),
+            patch.object(bot, "COPILOT_FALLBACK_MODEL", "gpt-5.4"),
+        )
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                patches[0], patches[1], patches[2], patches[3], patches[4], \
+                patches[5], patches[6], patches[7], patches[8]:
+            result = bot.run_copilot(
+                {"job_id": "job-fallback", "action": "chat", "source": "hello"},
+                tmpdir,
+            )
+
+        self.assertEqual("fallback answer", result)
+        self.assertEqual(2, len(calls))
+        self.assertEqual(
+            "gpt-5.6-sol", calls[0][calls[0].index("--model") + 1]
+        )
+        self.assertEqual("gpt-5.4", calls[1][calls[1].index("--model") + 1])
+
 
 class OperationsRegressionTests(unittest.TestCase):
     def test_progress_mapping_covers_live_stages(self):

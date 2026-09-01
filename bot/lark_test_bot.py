@@ -41,6 +41,9 @@ LOG_ANALYSIS_MAX_REVISIONS = int(
 )
 MAX_OUTPUT_CHARS = int(os.environ.get("LARK_TEST_BOT_MAX_REPLY_CHARS", "12000"))
 COPILOT_MODEL = os.environ.get("LARK_TEST_BOT_COPILOT_MODEL", "gpt-5.6-sol")
+COPILOT_FALLBACK_MODEL = os.environ.get(
+    "LARK_TEST_BOT_COPILOT_FALLBACK_MODEL", "gpt-5.4"
+)
 COPILOT_EFFORT = os.environ.get("LARK_TEST_BOT_COPILOT_EFFORT", "low")
 MAX_AUTOPILOT_CONTINUES = int(
     os.environ.get("LARK_TEST_BOT_MAX_AUTOPILOT_CONTINUES", "8")
@@ -5125,6 +5128,7 @@ def run_copilot(job, job_dir, heartbeat=None):
     try:
         current_prompt = prompt
         copilot_session_id = str(uuid.uuid4())
+        active_model = COPILOT_MODEL
         for attempt in range(max_revisions + 1):
             if is_cancel_requested(job["job_id"]):
                 raise JobCancelled("任务已由用户取消。")
@@ -5136,7 +5140,7 @@ def run_copilot(job, job_dir, heartbeat=None):
                 "--add-dir",
                 str(SKILL_DIR),
                 "--model",
-                COPILOT_MODEL,
+                active_model,
                 "--effort",
                 COPILOT_EFFORT,
                 "--disable-builtin-mcps",
@@ -5154,52 +5158,76 @@ def run_copilot(job, job_dir, heartbeat=None):
                 args.extend(["--session-id", copilot_session_id])
             else:
                 args.append(f"--resume={copilot_session_id}")
-            # 通过 stdin 传入 prompt，避免超长日志分析 prompt 触发命令行参数长度上限
-            # （[Errno 7] Argument list too long）。copilot 在未使用 -p 且 stdin 有输入时
-            # 会把 stdin 全文作为初始 prompt。
-            prompt_path = Path(job_dir) / ".copilot_prompt.txt"
-            prompt_path.write_text(current_prompt, encoding="utf-8")
-            prompt_stdin = prompt_path.open("r", encoding="utf-8")
-            try:
-                process = subprocess.Popen(
-                    args,
-                    stdin=prompt_stdin,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    start_new_session=True,
-                )
-            finally:
-                prompt_stdin.close()
-            with ACTIVE_LOCK:
-                ACTIVE_PROCESSES[job["job_id"]] = process
-            deadline = time.monotonic() + timeout
-            progress_interval = min(PROGRESS_INTERVAL, STATUS_REFRESH_INTERVAL)
-            next_progress = time.monotonic() + progress_interval
             while True:
-                if is_cancel_requested(job["job_id"]):
-                    terminate_and_wait(process)
-                    raise JobCancelled("任务已由用户取消。")
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    terminate_and_wait(process)
-                    raise RuntimeError(f"任务处理超过 {timeout} 秒，已停止。")
+                # 通过 stdin 传入 prompt，避免超长日志分析 prompt 触发命令行参数长度上限。
+                prompt_path = Path(job_dir) / ".copilot_prompt.txt"
+                prompt_path.write_text(current_prompt, encoding="utf-8")
+                prompt_stdin = prompt_path.open("r", encoding="utf-8")
                 try:
-                    stdout, stderr = process.communicate(
-                        timeout=min(5, max(1, remaining))
+                    process = subprocess.Popen(
+                        args,
+                        stdin=prompt_stdin,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        start_new_session=True,
                     )
+                finally:
+                    prompt_stdin.close()
+                with ACTIVE_LOCK:
+                    ACTIVE_PROCESSES[job["job_id"]] = process
+                deadline = time.monotonic() + timeout
+                progress_interval = min(PROGRESS_INTERVAL, STATUS_REFRESH_INTERVAL)
+                next_progress = time.monotonic() + progress_interval
+                while True:
+                    if is_cancel_requested(job["job_id"]):
+                        terminate_and_wait(process)
+                        raise JobCancelled("任务已由用户取消。")
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        terminate_and_wait(process)
+                        raise RuntimeError(f"任务处理超过 {timeout} 秒，已停止。")
+                    try:
+                        stdout, stderr = process.communicate(
+                            timeout=min(5, max(1, remaining))
+                        )
+                        break
+                    except subprocess.TimeoutExpired:
+                        pulse()
+                        if time.monotonic() >= next_progress:
+                            stage, progress = progress_message(job, job_dir)
+                            set_job_progress(job["job_id"], stage, progress)
+                            safe_update_job_card(job["job_id"])
+                            next_progress = time.monotonic() + progress_interval
+                if is_cancel_requested(job["job_id"]):
+                    raise JobCancelled("任务已由用户取消。")
+                if process.returncode == 0:
                     break
-                except subprocess.TimeoutExpired:
-                    pulse()
-                    if time.monotonic() >= next_progress:
-                        stage, progress = progress_message(job, job_dir)
-                        set_job_progress(job["job_id"], stage, progress)
-                        safe_update_job_card(job["job_id"])
-                        next_progress = time.monotonic() + progress_interval
-            if is_cancel_requested(job["job_id"]):
-                raise JobCancelled("任务已由用户取消。")
-            if process.returncode != 0:
-                raise RuntimeError(stderr.strip() or stdout.strip())
+                error_text = (stderr.strip() or stdout.strip())
+                resource_missing = (
+                    "400" in error_text
+                    and "resource you requested was not found" in error_text.lower()
+                )
+                if (
+                    resource_missing
+                    and active_model != COPILOT_FALLBACK_MODEL
+                    and COPILOT_FALLBACK_MODEL
+                ):
+                    logging.warning(
+                        "Copilot model %s unavailable for current account; retrying with %s",
+                        active_model,
+                        COPILOT_FALLBACK_MODEL,
+                    )
+                    active_model = COPILOT_FALLBACK_MODEL
+                    args[args.index("--model") + 1] = active_model
+                    set_job_progress(
+                        job["job_id"],
+                        "切换模型",
+                        f"{COPILOT_MODEL} 当前不可用，自动切换到 {active_model} 继续处理。",
+                    )
+                    safe_update_job_card(job["job_id"])
+                    continue
+                raise RuntimeError(error_text)
             if not stdout.strip():
                 raise RuntimeError(stderr.strip() or "模型未返回任务结果。")
             answer = stdout.strip()
